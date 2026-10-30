@@ -22,14 +22,15 @@
   const TICK_MS = 250;
   const VOLUME_EPSILON = 0.002;
   const BASELINE_DEBOUNCE_MS = 400;
-  const MUTE_SYNC_INTERVAL_MS = 5000;
   const USER_INPUT_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart'];
 
   let plan = null; // { sessionId, fadeStartAt, fadeEndAt, muteAt, startVolume, startMuted, status }
   let video = null; // the <video> currently being steered
   let lastWritten = null; // { volume, muted } as last written (or accepted) by us
   let lastUserInputAt = 0;
-  let lastMuteSyncAt = 0;
+  // Set while the video is muted because of SleepyTube. YouTube's own mute
+  // button doesn't know about it, so the user's next volume change unmutes.
+  let mutedByUs = false;
   let timer = null;
   let baselineTimer = null;
   let disposed = false;
@@ -94,17 +95,18 @@
     }
     if (target.muted != null && video.muted !== target.muted) {
       video.muted = target.muted;
-      if (target.muted) syncPlayerMute();
+      if (target.muted && !plan.startMuted) mutedByUs = true;
     }
     lastWritten = { volume: video.volume, muted: video.muted };
   }
 
-  /** Mirror our mute into YouTube's own player so its mute button agrees. */
-  function syncPlayerMute() {
-    const now = Date.now();
-    if (now - lastMuteSyncAt < MUTE_SYNC_INTERVAL_MS) return;
-    lastMuteSyncAt = now;
-    send({ type: 'st-player-mute', sessionId: plan.sessionId });
+  /** Not steering any more, but the user turned the volume up: let them hear it. */
+  function releaseMute(current) {
+    if (!mutedByUs || !current.muted || !lastWritten) return current;
+    if (Math.abs(current.volume - lastWritten.volume) < VOLUME_EPSILON) return current;
+    mutedByUs = false;
+    video.muted = false;
+    return { volume: video.volume, muted: false };
   }
 
   function tick() {
@@ -126,7 +128,7 @@
   }
 
   function onVolumeChange() {
-    if (!video || !plan) return;
+    if (!video) return;
     const current = { volume: video.volume, muted: video.muted };
     if (
       lastWritten &&
@@ -135,16 +137,17 @@
     ) {
       return; // our own write
     }
-    if (!steering()) {
-      lastWritten = current;
-      return;
-    }
     const now = Date.now();
     const userDriven = now - lastUserInputAt < core.USER_INPUT_WINDOW_MS;
+    if (!steering()) {
+      lastWritten = userDriven ? releaseMute(current) : current;
+      if (!current.muted) mutedByUs = false;
+      return;
+    }
     const target = core.fadeTargetAt(plan, now);
     if (target.phase === STATE.ARMED) {
       lastWritten = current;
-      if (userDriven) updateBaseline(current);
+      if (userDriven) updateBaseline(current, now);
       return;
     }
     if (userDriven) {
@@ -157,23 +160,19 @@
   }
 
   /** The user picked a new volume before the fade began: fade from that. */
-  function updateBaseline(current) {
+  function updateBaseline(current, at) {
     plan = { ...plan, startVolume: current.volume, startMuted: current.muted };
     clearTimeout(baselineTimer);
     const sessionId = plan.sessionId;
     baselineTimer = setTimeout(() => {
-      send({ type: 'st-baseline', sessionId, volume: current.volume, muted: current.muted });
+      send({ type: 'st-baseline', sessionId, volume: current.volume, muted: current.muted, at });
     }, BASELINE_DEBOUNCE_MS);
   }
 
   /** The user changed the volume mid-fade: stop steering and ask what to do. */
   function override(current) {
-    const volumeChanged = !lastWritten || Math.abs(current.volume - lastWritten.volume) >= VOLUME_EPSILON;
-    if (current.muted && lastWritten && lastWritten.muted && !plan.startMuted && volumeChanged) {
-      // SleepyTube muted the video and the user turned it up: make that audible.
-      video.muted = false;
-      current = { volume: video.volume, muted: false };
-    }
+    // If SleepyTube muted the video and the user turned it up, make that audible.
+    current = releaseMute(current);
     lastWritten = current;
     plan = { ...plan, status: FADE.OVERRIDDEN };
     stopTimer();
@@ -209,7 +208,6 @@
     }
     if (!next || !plan || next.sessionId !== plan.sessionId) clearTimeout(baselineTimer);
     plan = next ? { ...next } : null;
-    lastMuteSyncAt = 0;
     if (steering()) {
       startTimer();
       tick();
@@ -225,6 +223,7 @@
     if (!v) return false;
     v.volume = core.clamp(Number(volume), 0, 1);
     v.muted = !!muted;
+    mutedByUs = false;
     lastWritten = { volume: v.volume, muted: v.muted };
     return true;
   }

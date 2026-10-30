@@ -28,6 +28,7 @@ const ui = {
   testTimer: null,
   busy: false,
   announced: '',
+  focusAfterRender: null, // element id to focus once the next view is shown
 };
 
 // --- Plumbing ------------------------------------------------------------------
@@ -313,7 +314,7 @@ function onArm() {
       ui.confirmReplace = false;
       $('replace-confirm').hidden = true;
       announce(`Night is set. The fade begins in ${fadeText(settings.fadeMinutes)}.`);
-      requestAnimationFrame(() => $('armed-label').focus());
+      ui.focusAfterRender = 'armed-label';
       return;
     }
     if (res.code === 'needs-replace') {
@@ -371,8 +372,18 @@ function bindEvents() {
     $('fade-slider').focus();
   });
 
-  $('snooze').addEventListener('click', () => act('snooze', {}, () => announce('Snoozed for 9 minutes.')));
-  $('awake').addEventListener('click', () => act('dismiss', {}, () => announce('Alarm off. Good morning!')));
+  $('snooze').addEventListener('click', () =>
+    act('snooze', {}, () => {
+      announce('Snoozed for 9 minutes.');
+      ui.focusAfterRender = 'awake';
+    }),
+  );
+  $('awake').addEventListener('click', () =>
+    act('dismiss', {}, () => {
+      announce('Alarm off. Good morning!');
+      ui.focusAfterRender = 'done-label';
+    }),
+  );
 
   $('restore').addEventListener('click', () => act('restore-sound', {}, () => announce('Video sound restored.')));
   $('done').addEventListener('click', () => act('finish-night', {}));
@@ -594,6 +605,11 @@ function render() {
   else renderDone(d, now);
   if (changed) announce(describeForAnnouncement(view, d));
   else if (view === 'armed' && !$('override-banner').hidden) announce(describeForAnnouncement(view, d));
+  if (ui.focusAfterRender && !ui.busy) {
+    const target = $(ui.focusAfterRender);
+    ui.focusAfterRender = null;
+    if (target && target.offsetParent !== null) target.focus();
+  }
 }
 
 // --- Startup ---------------------------------------------------------------------

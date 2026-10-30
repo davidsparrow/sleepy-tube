@@ -53,6 +53,12 @@ function stopBackupAudio() {
   backup = null;
 }
 
+/** Keeps keyboard focus on the main control after the buttons change. */
+function refocus() {
+  const target = ['snooze', 'awake', 'restore', 'close'].map($).find((b) => !b.hidden);
+  if (target && (document.activeElement === document.body || document.activeElement.hidden)) target.focus();
+}
+
 async function act(type) {
   if (busy) return;
   busy = true;
@@ -64,6 +70,7 @@ async function act(type) {
   setText(error, res.ok ? '' : res.message || 'Something went wrong.');
   if (res.ok && 'session' in res) session = res.session;
   render();
+  refocus();
 }
 
 function render() {
@@ -107,7 +114,9 @@ function render() {
   const audioError = $('audio-error');
   audioError.hidden = !(ringing && wake.audioError);
   setText(audioError, ringing && wake.audioError ? `The alarm player failed (${wake.audioError}); playing here instead.` : '');
-  if (ringing && wake.audioError) startBackupAudio(wake, `${session.id}:${wake.ringStartedAt}`);
+  // Never longer than the alarm's own 15-minute limit, even after a long sleep.
+  const withinLimit = ringing && now - wake.ringStartedAt < core.WAKE_AUTO_STOP_MS;
+  if (withinLimit && wake.audioError) startBackupAudio(wake, `${session.id}:${wake.ringStartedAt}`);
   else stopBackupAudio();
 
   const canRestore = !!fade && fade.status === FADE.ACTIVE && now >= fade.fadeStartAt;

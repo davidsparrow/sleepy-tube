@@ -95,14 +95,16 @@ test('one click arms the default night; the fade, whisper and mute follow the ti
   near(state.volume, 0.8 * 0.04, 0.001, 'whisper volume');
   assert.equal(state.muted, false);
 
-  // Silence: muted, still playing, speed untouched, YouTube's own mute in sync.
+  // Silence: muted, still playing, speed untouched. YouTube's own player (and
+  // the mute preference it saves for future tabs) is never touched.
   await h.fastForward(env.context, 5);
   state = await h.waitFor(async () => {
     const st = await h.videoState(video);
-    return st.muted && st.yt.mute > 0 && st;
+    return st.muted && st;
   }, { message: 'video muted' });
   assert.equal(state.paused, false);
   assert.equal(state.rate, 1);
+  assert.deepEqual(state.yt, { mute: 0, unmute: 0 });
 
   // The other YouTube tab is never touched.
   const untouched = await h.videoState(other);
@@ -491,4 +493,98 @@ test('the wake time can be changed from the armed view', async () => {
   await popup.waitForSelector('#armed-error:not([hidden])');
   assert.match(await popup.textContent('#armed-error'), /before the fade finishes/);
   assert.equal((await h.session(env.context)).wake.time, newTime);
+});
+
+async function armWithWake(popup, minutesAhead) {
+  await popup.click('#wake-section .switch');
+  await popup.fill('#wake-time', h.clockIn(minutesAhead));
+  await armFromPopup(popup);
+}
+
+test('+15 minutes after the video is muted brings the sound back and keeps it', async () => {
+  const video = await h.openVideo(env.context, { volume: 0.8 });
+  const popup = await h.openPopup(env.context, env.extensionId, video);
+  await armWithWake(popup, 180);
+  await h.fastForward(env.context, 36);
+  await h.waitFor(async () => (await h.videoState(video)).muted, { message: 'muted' });
+  await popup.click('#extend');
+  await h.waitFor(async () => !(await h.videoState(video)).muted, { message: 'unmuted' });
+  await video.waitForTimeout(1500); // nothing may mute it again
+  const state = await h.videoState(video);
+  assert.equal(state.muted, false);
+  assert.equal(state.volume, 0.8);
+  const s = await h.session(env.context);
+  near(s.fade.fadeStartAt - Date.now(), 15 * MINUTE, 3000, 'new countdown');
+});
+
+test('after the night, turning the volume up unmutes the video', async () => {
+  const video = await h.openVideo(env.context, { volume: 0.8 });
+  const popup = await h.openPopup(env.context, env.extensionId, video);
+  await armFromPopup(popup);
+  await h.fastForward(env.context, 36);
+  await popup.waitForSelector('#view-done:not([hidden])');
+  await popup.click('#done'); // leaves the video muted
+  await popup.waitForSelector('#view-setup:not([hidden])');
+  assert.equal((await h.videoState(video)).muted, true);
+  await video.click('#louder'); // YouTube's slider doesn't know the video is muted
+  await h.waitFor(async () => !(await h.videoState(video)).muted, { message: 'audible again' });
+  assert.equal((await h.videoState(video)).volume, 0.9);
+});
+
+test('a missed alarm stays reported even when the YouTube tab is gone', async () => {
+  const video = await h.openVideo(env.context);
+  const popup = await h.openPopup(env.context, env.extensionId, video);
+  await armWithWake(popup, 90);
+  // As after a browser restart: the stored tab no longer exists.
+  await h.swEval(env.context, async () => {
+    const { session } = await chrome.storage.local.get('session');
+    session.fade.tabId = 987654;
+    session.fade.fadeStartAt -= 40 * 60000;
+    session.fade.fadeEndAt -= 40 * 60000;
+    session.fade.muteAt -= 40 * 60000;
+    await chrome.storage.local.set({ session });
+  });
+  const s = await h.session(env.context);
+  await h.fastForward(env.context, Math.ceil((s.wake.nextRingAt - Date.now()) / MINUTE) + 45);
+  const after = await h.session(env.context);
+  assert.ok(after, 'the night is kept so the miss can be reported');
+  assert.equal(after.wake.status, 'missed');
+  await popup.waitForSelector('#view-done:not([hidden])');
+  assert.equal(await popup.textContent('#done-label'), 'Wake alarm missed');
+});
+
+test('replacing the night from another tab leaves the first video as it is', async () => {
+  const first = await h.openVideo(env.context, { volume: 0.8 });
+  const popup = await h.openPopup(env.context, env.extensionId, first);
+  await armFromPopup(popup);
+  await h.fastForward(env.context, 26);
+  await first.waitForTimeout(600);
+  const faded = (await h.videoState(first)).volume;
+  assert.ok(faded < 0.5);
+
+  const second = await h.openVideo(env.context, { volume: 0.7, id: 'second' });
+  const popup2 = await h.openPopup(env.context, env.extensionId, second);
+  await popup2.click('#new-night');
+  await popup2.click('#arm');
+  await popup2.click('#replace-yes');
+  await popup2.waitForSelector('#view-armed:not([hidden])');
+  await first.waitForTimeout(800);
+  near((await h.videoState(first)).volume, faded, 0.02, 'first tab not turned back up');
+  assert.equal((await h.session(env.context)).fade.originalVolume, 0.7);
+});
+
+test('turning the sound up once the alarm rings ends the fade instead of asking to resume', async () => {
+  const video = await h.openVideo(env.context, { volume: 0.8 });
+  const popup = await h.openPopup(env.context, env.extensionId, video);
+  await armWithWake(popup, 60);
+  const s = await h.session(env.context);
+  await h.fastForward(env.context, Math.ceil((s.wake.nextRingAt - Date.now()) / MINUTE));
+  await h.waitFor(async () => (await h.session(env.context)).wake.status === 'ringing', { message: 'ringing' });
+  await video.click('#louder');
+  await h.waitFor(async () => (await h.session(env.context)).fade.status === 'restored', { message: 'fade ended' });
+  assert.equal((await h.videoState(video)).muted, false);
+  await popup.click('#awake');
+  await popup.waitForSelector('#view-done:not([hidden])');
+  assert.equal(await popup.isVisible('#restore'), false);
+  await popup.waitForFunction(() => document.activeElement.id === 'done-label'); // focus follows the result
 });

@@ -6,6 +6,12 @@ SleepyTube is a tiny Chrome extension for people who fall asleep to YouTube. It 
 
 It is built to the [product requirements document](SleepyTube_PRD_v1.md) (MVP, v1.0).
 
+<p>
+  <img src="docs/screenshots/popup-setup.png" alt="Setup: fade slider set to 20 minutes, wake alarm at 7:00 AM with test sound, alarm volume and keep-awake options" width="250">
+  <img src="docs/screenshots/popup-armed.png" alt="Armed: night is set, fade starts in 20 minutes, wake alarm 7:00 AM tomorrow" width="250">
+  <img src="docs/screenshots/wake-window.png" alt="Wake window: large Snooze 9 min and I'm awake buttons" width="250">
+</p>
+
 > **Important:** SleepyTube cannot wake a sleeping computer. The wake alarm only rings if Chrome is open and the computer is awake, so keep a separate alarm as a backup.
 
 ## Install (developer mode)
@@ -58,7 +64,7 @@ Example: armed at 11:00 PM with the default 20-minute countdown and a 7:00 AM wa
 | `alarms` | Schedule the fade steps and the wake alarm so they survive the service worker sleeping. |
 | `offscreen` | Play the bundled chime in a hidden extension page, independent of the YouTube tab. |
 | `notifications` | Secondary Snooze / I'm awake controls, and warnings (tab closed, alarm missed). |
-| `scripting` | Reach YouTube tabs that were open before install, and keep YouTube's own mute button in sync. |
+| `scripting` | Reach YouTube tabs that were open before install (only the bundled content script is injected). |
 | `power` *(optional)* | Requested only when you turn on **Keep computer awake**; uses the `system` level and is released after the alarm. |
 
 No `tabs`, history, or "all sites" access is requested.
@@ -96,14 +102,16 @@ npm run package           # zip extension/ into dist/ for the Chrome Web Store
 npm run assets            # regenerate the chime and icons (Python 3, numpy, Pillow, ffmpeg)
 ```
 
-The end-to-end suite loads the extension into Chromium, serves a stand-in `www.youtube.com` watch page through request interception, and moves time forward with the service worker's debug helper. It covers the full fade timeline, YouTube resetting the volume, player replacement, reload mid-fade, user overrides, +15 minutes, cancel/restore, schedule validation, ring/snooze/dismiss, auto-stop, missed alarms, tab closure, replacing a night, service-worker restart, the test sound, keep-awake, and editing the wake time.
+The end-to-end suite loads the extension into Chromium, serves a stand-in `www.youtube.com` watch page through request interception, and moves time forward with the service worker's debug helper. It covers the full fade timeline, YouTube resetting the volume, player replacement, reload mid-fade, user overrides (before, during and after the fade, and while the alarm rings), +15 minutes (including after mute), cancel/restore, schedule validation, ring/snooze/dismiss, auto-stop, missed alarms (including with the tab gone), tab closure, replacing a night from the same or another tab, service-worker restart, the test sound, keep-awake, editing the wake time, and that other tabs and YouTube's own player settings are never touched.
 
 ### How it works
 
 - **Absolute timestamps, not timers.** Arming stores `fadeStartAt`, `fadeEndAt`, `muteAt` and `wakeAt` in `chrome.storage.local`. The content script computes the volume from `Date.now()`, so throttled background tabs make steps coarser but never late. `chrome.alarms` wakes the service worker for each transition.
 - **One idempotent reconcile.** Every service-worker start, alarm, and popup open runs `reconcile()`, which brings alarms, audio, keep-awake and the page in line with the stored session. A ring is persisted as `ringing` before any sound starts, so duplicate alarm events or restarts can't start a second ring.
 - **State machine.** `IDLE → ARMED → FADING → WHISPER → MUTED → WAKING ⇄ SNOOZED → DISMISSED`, plus `MISSED_WAKE` and `ERROR`; Cancel returns to `IDLE`. The overall state is derived from the fade and wake sub-states (`lib/core.js#describeSession`).
-- **Not fighting YouTube or the user.** Volume changes YouTube makes on its own (a new playlist item, an ad, a swapped player) are quietly corrected. Changes within 1.5 s of a click, key or scroll in the page count as the user's, which pauses the fade. When SleepyTube mutes, it also calls YouTube's player `mute()` so the mute button agrees.
+- **Not fighting YouTube or the user.** Volume changes YouTube makes on its own (a new playlist item, an ad, a swapped player) are quietly corrected. Changes within 1.5 s of a click, key or scroll in the page count as the user's, which pauses the fade.
+- **Only the video element is muted.** SleepyTube never calls YouTube's player API, so YouTube's saved volume/mute preference (and therefore any YouTube tab opened later) is untouched. Because YouTube's own mute button doesn't know about it, turning the volume up with YouTube's controls unmutes the video, even after the night has ended.
+- **A hung tab can't block the alarm.** Calls to the YouTube tab time out after 3 seconds, so Snooze and I'm awake always respond.
 - **Wake audio** is a bundled, original Ogg/Opus chime played in an offscreen document with a dB-linear 90-second ramp. If that player reports a failure, the wake window plays the chime itself and the notification becomes audible.
 
 ### Debugging
