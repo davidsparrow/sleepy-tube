@@ -1,0 +1,78 @@
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px 16px;
+  background: linear-gradient(180deg, #1b1946 0%, #3a2a62 45%, #7a4f5c 80%, #c07a4e 100%);
+  background-size: 100% 200%;
+  animation: sunrise 40s ease-in-out infinite alternate;
+}
+
+@keyframes sunrise {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 100%;
+  }
+}
+
+.wake {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+  text-align: center;
+}
+
+.clock {
+  margin: 0;
+  font-size: 64px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -1px;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.35);
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.sub {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.huge {
+  width: 100%;
+  min-height: 72px;
+  font-size: 22px;
+  border-radius: 18px;
+}
+
+.btn:not(.btn-primary) {
+  background: rgba(17, 18, 42, 0.72);
+}
+
+.note {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+  opacity: 0.9;
+}

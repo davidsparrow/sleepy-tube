@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>SleepyTube</title>
+    <link rel="stylesheet" href="../ui/theme.css" />
+    <link rel="stylesheet" href="popup.css" />
+    <script src="../lib/core.js"></script>
+    <script src="popup.js" defer></script>
+  </head>
+  <body>
+    <header class="brand">
+      <img src="../icons/icon-32.png" alt="" width="26" height="26" />
+      <h1>SleepyTube</h1>
+    </header>
+
+    <p id="live" class="sr-only" aria-live="polite"></p>
+
+    <!-- Idle: set up tonight -->
+    <main id="view-setup" hidden>
+      <p id="replace-note" class="note" hidden>A night is already set. Starting a new one will replace it.</p>
+      <p id="tab-note" class="note" role="status" hidden></p>
+
+      <section class="card" aria-labelledby="fade-label">
+        <label id="fade-label" for="fade-slider" class="label">Fade begins in</label>
+        <div class="slider">
+          <input type="range" id="fade-slider" min="0" max="7" step="1" value="3" />
+          <div class="ticks" id="fade-ticks" aria-hidden="true"></div>
+        </div>
+        <output id="fade-value" for="fade-slider" class="value">20 minutes</output>
+      </section>
+
+      <div id="setup-wake-slot"></div>
+
+      <div id="replace-confirm" class="confirm" role="alertdialog" aria-labelledby="replace-q" hidden>
+        <p id="replace-q">Replace tonight's session? Its fade and wake alarm will be cancelled.</p>
+        <div class="row">
+          <button id="replace-yes" type="button" class="btn btn-primary">Replace</button>
+          <button id="replace-no" type="button" class="btn">Keep current</button>
+        </div>
+      </div>
+
+      <p id="setup-error" class="error" role="alert" hidden></p>
+
+      <button id="arm" type="button" class="btn btn-primary btn-main">Have a good sleep 🌙</button>
+      <p class="summary">10-min fade · 5-min whisper · then silence</p>
+      <div class="links">
+        <button id="back-to-night" type="button" class="btn-link" hidden>Back to tonight's session</button>
+      </div>
+    </main>
+
+    <!-- Armed: the night is running -->
+    <main id="view-armed" hidden>
+      <button type="button" class="btn btn-primary btn-main is-set" aria-disabled="true" tabindex="-1">
+        Night is set 🌙
+      </button>
+
+      <section class="card status" aria-labelledby="armed-label">
+        <p id="armed-label" class="label" tabindex="-1"></p>
+        <p id="armed-big" class="big"></p>
+        <ol class="steps" aria-label="Tonight's steps">
+          <li data-step="ARMED">Countdown</li>
+          <li data-step="FADING">Fade</li>
+          <li data-step="WHISPER">Whisper</li>
+          <li data-step="MUTED">Silence</li>
+        </ol>
+        <p id="armed-sub" class="hint"></p>
+      </section>
+
+      <div id="override-banner" class="banner" role="alert" hidden>
+        <p>You changed the video's volume, so SleepyTube paused the fade.</p>
+        <div class="row">
+          <button id="resume-fade" type="button" class="btn">Resume fade</button>
+          <button id="cancel-fade" type="button" class="btn">Cancel fade</button>
+        </div>
+      </div>
+
+      <ul id="armed-notices" class="notices"></ul>
+
+      <section id="armed-wake" class="card" hidden>
+        <p id="armed-wake-when"></p>
+        <p class="hint">Wake reliability: Chrome must stay open; computer must stay awake.</p>
+        <p id="armed-keep-awake" class="hint" hidden>Keeping the computer awake until the alarm.</p>
+        <p id="armed-audio-error" class="error" hidden></p>
+      </section>
+
+      <div id="armed-actions" class="actions">
+        <button id="extend" type="button" class="btn" title="Add 15 minutes before the fade begins">+15 minutes</button>
+        <button id="change-wake" type="button" class="btn">Change wake time</button>
+        <button id="cancel-night" type="button" class="btn btn-danger">Cancel night</button>
+      </div>
+
+      <div id="wake-editor" hidden>
+        <div id="editor-wake-slot"></div>
+        <div class="row">
+          <button id="editor-save" type="button" class="btn btn-primary">Save wake alarm</button>
+          <button id="editor-cancel" type="button" class="btn">Cancel</button>
+        </div>
+      </div>
+
+      <p id="armed-error" class="error" role="alert" hidden></p>
+
+      <div class="links">
+        <button id="goto-tab" type="button" class="btn-link" hidden>Go to the video</button>
+        <button id="new-night" type="button" class="btn-link">New night…</button>
+      </div>
+    </main>
+
+    <!-- Waking: the alarm is ringing or snoozed -->
+    <main id="view-waking" hidden>
+      <section class="card wake-card">
+        <p id="waking-label" class="label"></p>
+        <p id="waking-big" class="big"></p>
+        <p id="waking-sub" class="hint"></p>
+        <p id="waking-audio-error" class="error" hidden></p>
+      </section>
+      <button id="snooze" type="button" class="btn btn-primary btn-huge">Snooze 9 min</button>
+      <button id="awake" type="button" class="btn btn-huge">I'm awake</button>
+      <p class="hint center">The video stays muted until you choose to restore it.</p>
+      <p id="waking-error" class="error" role="alert" hidden></p>
+    </main>
+
+    <!-- Done: nothing else is scheduled -->
+    <main id="view-done" hidden>
+      <section class="card">
+        <p id="done-label" class="label"></p>
+        <p id="done-text"></p>
+      </section>
+      <ul id="done-notices" class="notices"></ul>
+      <button id="restore" type="button" class="btn btn-huge">Restore video sound</button>
+      <button id="done" type="button" class="btn btn-primary btn-main">Done</button>
+      <p id="done-error" class="error" role="alert" hidden></p>
+    </main>
+
+    <!-- Wake controls: shown in the setup view, or in the armed view's editor -->
+    <template id="wake-template">
+      <section class="card wake" id="wake-section" aria-label="Wake alarm">
+        <div class="row wake-row">
+          <label class="switch">
+            <input type="checkbox" id="wake-enabled" role="switch" />
+            <span class="track" aria-hidden="true"></span>
+            <span>Wake me at</span>
+          </label>
+          <input type="time" id="wake-time" value="07:00" aria-label="Wake time" required />
+        </div>
+        <div id="wake-details" hidden>
+          <p id="wake-when" class="hint" aria-live="polite"></p>
+          <div class="row">
+            <button id="test-sound" type="button" class="btn" aria-pressed="false">▶ Test wake sound</button>
+            <label class="volume">
+              <span>Alarm volume</span>
+              <input type="range" id="wake-volume" min="10" max="100" step="5" value="70" />
+            </label>
+          </div>
+          <label class="check">
+            <input type="checkbox" id="keep-awake" aria-describedby="keep-awake-help" />
+            <span>Keep computer awake for alarm</span>
+          </label>
+          <p id="keep-awake-help" class="fine">
+            Stops the computer sleeping from inactivity until the alarm is dismissed (the screen can still turn off).
+            Uses more battery, so plug in a laptop. It cannot stop sleep from closing the lid.
+          </p>
+          <p class="disclosure">
+            SleepyTube cannot wake your computer from sleep. Keep Chrome open and the computer awake, or use a separate
+            alarm as backup.
+          </p>
+          <details class="tips">
+            <summary>Setup tips for a reliable alarm</summary>
+            <ul>
+              <li>Set your computer not to sleep tonight, or turn on “Keep computer awake”.</li>
+              <li>Leave Chrome running; closing it cancels the alarm.</li>
+              <li>Keep a laptop lid open and plugged in.</li>
+              <li>Check the system volume isn't muted, and press Test to hear where the sound plays (speakers or headphones).</li>
+            </ul>
+          </details>
+        </div>
+      </section>
+    </template>
+  </body>
+</html>
