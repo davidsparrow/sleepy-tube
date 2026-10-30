@@ -24,7 +24,7 @@
   const BASELINE_DEBOUNCE_MS = 400;
   const USER_INPUT_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart'];
 
-  let plan = null; // { sessionId, fadeStartAt, fadeEndAt, muteAt, startVolume, startMuted, status }
+  let plan = null; // { sessionId, fadeStartAt, fadeFromAt, fadeFromGain, fadeEndAt, muteAt, startVolume, startMuted, status }
   let video = null; // the <video> currently being steered
   let lastWritten = null; // { volume, muted } as last written (or accepted) by us
   let lastUserInputAt = 0;
@@ -189,7 +189,7 @@
   }
 
   function sameTimeline(a, b) {
-    return a.fadeStartAt === b.fadeStartAt && a.fadeEndAt === b.fadeEndAt && a.muteAt === b.muteAt;
+    return ['fadeStartAt', 'fadeFromAt', 'fadeFromGain', 'fadeEndAt', 'muteAt'].every((k) => a[k] === b[k]);
   }
 
   function setPlan(next) {
@@ -202,7 +202,7 @@
       sameTimeline(plan, next)
     ) {
       // A plan sent before our override report arrived: keep the override
-      // (never fight the user) and report it again. Resume/+15 send a new timeline.
+      // (never fight the user) and report it again. Resume/Restart send a new timeline.
       send({ type: 'st-override', sessionId: plan.sessionId, volume: video ? video.volume : 0, muted: !!(video && video.muted) });
       return;
     }

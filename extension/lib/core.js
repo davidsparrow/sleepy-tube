@@ -14,17 +14,23 @@
 
   const SECOND = 1000;
   const MINUTE = 60 * SECOND;
+  const HOUR = 60 * MINUTE;
 
-  // --- Product decisions (PRD §13) ---------------------------------------
-  const FADE_START_OPTIONS = Object.freeze([5, 10, 15, 20, 30, 45, 60, 90]);
-  const DEFAULT_FADE_START_MINUTES = 20;
-  const FADE_DURATION_MS = 10 * MINUTE;
-  const WHISPER_HOLD_MS = 5 * MINUTE;
+  // --- Fader choices -----------------------------------------------------
+  const DELAY_OPTIONS = Object.freeze([10, 15, 20, 30, 45, 60, 90]);
+  const FADE_OPTIONS = Object.freeze([10, 15, 20, 30]);
+  const WHISPER_OPTIONS = Object.freeze([10, 15, 20, 30]);
+  const EXTEND_OPTIONS = Object.freeze([10, 20]);
   // Whisper level as a fraction of the starting volume (~3–5%, PRD §5).
   const WHISPER_RATIO = 0.04;
-  const EXTEND_MS = 15 * MINUTE;
+  const WHISPER_DB = 20 * Math.log10(WHISPER_RATIO);
+  // A fade shortened mid-way still takes at least this long to finish.
+  const MIN_FADE_REMAINING_MS = MINUTE;
 
+  // --- Alarm -------------------------------------------------------------
   const SNOOZE_MS = 9 * MINUTE;
+  const WAKE_SHIFT_MS = 10 * MINUTE;
+  const WAKE_MAX_AHEAD_MS = 24 * HOUR;
   const WAKE_RAMP_MS = 90 * SECOND;
   // The wake ramp starts this far below the chosen alarm volume.
   const WAKE_RAMP_FLOOR_DB = -35;
@@ -39,21 +45,24 @@
   // A volume change within this window after a click/key/scroll in the page
   // is treated as the user's own change (an override) rather than YouTube's.
   const USER_INPUT_WINDOW_MS = 1500;
-  // Finished sessions are forgotten after this long.
-  const SESSION_MAX_AGE_MS = 36 * 60 * MINUTE;
+  // Sessions are forgotten after this long, whatever their state.
+  const SESSION_MAX_AGE_MS = 36 * HOUR;
+  const SESSION_VERSION = 2;
 
   const YOUTUBE_ORIGIN = 'https://www.youtube.com';
   const YOUTUBE_MATCH = YOUTUBE_ORIGIN + '/*';
 
   const DEFAULT_SETTINGS = Object.freeze({
-    fadeMinutes: DEFAULT_FADE_START_MINUTES,
-    wakeEnabled: false,
+    delayMinutes: 20,
+    fadeMinutes: 10,
+    whisperMinutes: 10,
     wakeTime: '07:00',
     keepAwake: false,
     wakeVolume: 0.7,
   });
 
-  // Overall session states (PRD §8). CANCELLED returns to IDLE.
+  // Overall session states (PRD §8). Missed / dismissed / lost outcomes are
+  // reported as notices, after which the relevant switch is simply off.
   const STATE = Object.freeze({
     IDLE: 'IDLE',
     ARMED: 'ARMED',
@@ -62,28 +71,19 @@
     MUTED: 'MUTED',
     WAKING: 'WAKING',
     SNOOZED: 'SNOOZED',
-    DISMISSED: 'DISMISSED',
-    MISSED_WAKE: 'MISSED_WAKE',
-    ERROR: 'ERROR',
   });
 
-  // fade.status: whether SleepyTube is still steering the video's volume.
+  // fade.status while the Fade switch is on.
   const FADE = Object.freeze({
     ACTIVE: 'active',
-    OVERRIDDEN: 'overridden', // the user changed the volume; waiting for Resume/Cancel
-    LOST: 'lost', // the tab closed or left YouTube
-    CANCELLED: 'cancelled',
-    RESTORED: 'restored',
+    OVERRIDDEN: 'overridden', // the user changed the volume; waiting for Resume
   });
 
-  // wake.status
+  // wake.status while the Alarm switch is on.
   const WAKE = Object.freeze({
     SCHEDULED: 'scheduled',
     RINGING: 'ringing',
     SNOOZED: 'snoozed',
-    DISMISSED: 'dismissed',
-    EXPIRED: 'expired', // rang for WAKE_AUTO_STOP_MS without a response
-    MISSED: 'missed',
   });
 
   function clamp(x, lo, hi) {
@@ -92,7 +92,7 @@
 
   // --- Clock time --------------------------------------------------------
 
-  /** Parses "HH:MM" (24-hour, as produced by <input type="time">). */
+  /** Parses "HH:MM" (24-hour). */
   function parseClockTime(value) {
     const match = /^(\d{1,2}):(\d{2})$/.exec(String(value || '').trim());
     if (!match) return null;
@@ -103,9 +103,8 @@
   }
 
   /**
-   * Next local occurrence of a clock time strictly after `now`. A time equal to
-   * or earlier than now rolls to the following day (PRD §5). Built from local
-   * calendar fields so DST transitions land on the intended wall-clock time.
+   * Next local occurrence of a clock time strictly after `now`. Built from
+   * local calendar fields so DST transitions land on the wall-clock time.
    */
   function nextOccurrence(value, now) {
     const t = parseClockTime(value);
@@ -116,17 +115,73 @@
     return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, t.hours, t.minutes, 0, 0).getTime();
   }
 
-  // --- Fade timeline -----------------------------------------------------
+  const pad2 = (n) => String(n).padStart(2, '0');
 
-  function isValidFadeMinutes(minutes) {
-    return FADE_START_OPTIONS.includes(Number(minutes));
+  /** "HH:MM" for a timestamp, e.g. to remember the last wake time used. */
+  function clockTimeOf(ms) {
+    const d = new Date(ms);
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   }
 
-  /** Absolute timestamps for a fade whose countdown starts at `from`. */
-  function planFadeTimes(from, countdownMs) {
-    const fadeStartAt = from + countdownMs;
-    const fadeEndAt = fadeStartAt + FADE_DURATION_MS;
-    return { fadeStartAt, fadeEndAt, muteAt: fadeEndAt + WHISPER_HOLD_MS };
+  /** Value for <input type="datetime-local">: "YYYY-MM-DDTHH:MM", local time. */
+  function toDateTimeLocal(ms) {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${clockTimeOf(ms)}`;
+  }
+
+  function parseDateTimeLocal(value) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(value || ''));
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
+    return Number.isNaN(d.getTime()) ? null : d.getTime();
+  }
+
+  // --- Fade timeline -----------------------------------------------------
+
+  function sanitizeMinutes(value, options, fallback) {
+    const n = Number(value);
+    return options.includes(n) ? n : fallback;
+  }
+
+  /** The three fader choices, each forced onto its list of allowed values. */
+  function fadeChoices(input) {
+    const d = DEFAULT_SETTINGS;
+    return {
+      delayMinutes: sanitizeMinutes(input && input.delayMinutes, DELAY_OPTIONS, d.delayMinutes),
+      fadeMinutes: sanitizeMinutes(input && input.fadeMinutes, FADE_OPTIONS, d.fadeMinutes),
+      whisperMinutes: sanitizeMinutes(input && input.whisperMinutes, WHISPER_OPTIONS, d.whisperMinutes),
+    };
+  }
+
+  /** A fresh timeline whose countdown starts at `from`. */
+  function planFadeTimes(from, choices) {
+    const c = fadeChoices(choices);
+    const fadeStartAt = from + c.delayMinutes * MINUTE;
+    const fadeEndAt = fadeStartAt + c.fadeMinutes * MINUTE;
+    return {
+      ...c,
+      delayStartedAt: from,
+      fadeStartAt,
+      fadeFromAt: fadeStartAt,
+      fadeFromGain: 1,
+      fadeEndAt,
+      muteAt: fadeEndAt + c.whisperMinutes * MINUTE,
+    };
+  }
+
+  /** A timeline whose fade starts right now (Resume after an override). */
+  function planFadeFromNow(now, choices) {
+    const c = fadeChoices(choices);
+    const fadeEndAt = now + c.fadeMinutes * MINUTE;
+    return {
+      ...c,
+      delayStartedAt: now,
+      fadeStartAt: now,
+      fadeFromAt: now,
+      fadeFromGain: 1,
+      fadeEndAt,
+      muteAt: fadeEndAt + c.whisperMinutes * MINUTE,
+    };
   }
 
   function fadePhaseAt(fade, now) {
@@ -141,13 +196,20 @@
   }
 
   /**
-   * Volume multiplier at fade progress p ∈ [0, 1]. The fade is linear in
-   * decibels (perceptually even) with eased ends, falling from 1 to
-   * WHISPER_RATIO. Progress comes from timestamps, so the curve is the same
-   * however often (or rarely) the page's timers run.
+   * Volume multiplier (relative to the starting volume) during the fade. The
+   * fade is linear in decibels (perceptually even) with eased ends, from
+   * `fadeFromGain` at `fadeFromAt` down to the whisper level at `fadeEndAt`.
+   * `fadeFromAt`/`fadeFromGain` move when a fade is lengthened mid-way, so the
+   * volume carries on from where it was instead of jumping back up.
    */
-  function fadeGain(p) {
-    return Math.pow(WHISPER_RATIO, easeInOutSine(clamp(p, 0, 1)));
+  function fadeGainAt(fade, now) {
+    const fromAt = Math.max(fade.fadeFromAt != null ? fade.fadeFromAt : fade.fadeStartAt, fade.fadeStartAt);
+    const fromGain = clamp(fade.fadeFromGain != null ? fade.fadeFromGain : 1, WHISPER_RATIO, 1);
+    if (now <= fromAt) return fromGain;
+    if (now >= fade.fadeEndAt) return WHISPER_RATIO;
+    const fromDb = 20 * Math.log10(fromGain);
+    const p = (now - fromAt) / (fade.fadeEndAt - fromAt);
+    return Math.pow(10, (fromDb + (WHISPER_DB - fromDb) * easeInOutSine(p)) / 20);
   }
 
   /**
@@ -161,15 +223,78 @@
     switch (phase) {
       case STATE.ARMED:
         return { phase, volume: null, muted: null };
-      case STATE.FADING: {
-        const p = (now - fade.fadeStartAt) / (fade.fadeEndAt - fade.fadeStartAt);
-        return { phase, volume: start * fadeGain(p), muted: null };
-      }
+      case STATE.FADING:
+        return { phase, volume: start * fadeGainAt(fade, now), muted: null };
       case STATE.WHISPER:
         return { phase, volume: start * WHISPER_RATIO, muted: null };
       default:
         return { phase, volume: start * WHISPER_RATIO, muted: true };
     }
+  }
+
+  /** Re-anchors the fade at `now` so its curve can be changed without a jump. */
+  function rebaseAt(fade, now) {
+    return { fadeFromAt: now, fadeFromGain: fadeGainAt(fade, now) };
+  }
+
+  /**
+   * "+10 / +20": keeps the current phase going `minutes` longer. Returns the
+   * timeline fields to change, or { error } once the video is already silent.
+   */
+  function extendFade(fade, minutes, now) {
+    const ms = Number(minutes) * MINUTE;
+    switch (fadePhaseAt(fade, now)) {
+      case STATE.ARMED:
+        return {
+          fadeStartAt: fade.fadeStartAt + ms,
+          fadeFromAt: fade.fadeStartAt + ms,
+          fadeFromGain: 1,
+          fadeEndAt: fade.fadeEndAt + ms,
+          muteAt: fade.muteAt + ms,
+        };
+      case STATE.FADING:
+        return { ...rebaseAt(fade, now), fadeEndAt: fade.fadeEndAt + ms, muteAt: fade.muteAt + ms };
+      case STATE.WHISPER:
+        return { muteAt: fade.muteAt + ms };
+      default:
+        return { error: 'silent' };
+    }
+  }
+
+  /**
+   * A chip changed while the Fade switch is on. Phases that have already
+   * started can't have their *start* moved, so: the countdown chip only works
+   * before the fade, the fade-length chip until the whisper, and the whisper
+   * chip until silence. Returns the fields to change, or { error: 'locked' }.
+   */
+  function retimeFade(fade, input, now) {
+    const c = fadeChoices({ ...fade, ...input });
+    const phase = fadePhaseAt(fade, now);
+    const order = [STATE.ARMED, STATE.FADING, STATE.WHISPER, STATE.MUTED];
+    const at = order.indexOf(phase);
+    const changes = { ...c };
+    if (input.delayMinutes != null && c.delayMinutes !== fade.delayMinutes) {
+      if (at > 0) return { error: 'locked' };
+      changes.fadeStartAt = Math.max(fade.delayStartedAt + c.delayMinutes * MINUTE, now);
+      changes.fadeFromAt = changes.fadeStartAt;
+      changes.fadeFromGain = 1;
+    }
+    const fadeStartAt = changes.fadeStartAt != null ? changes.fadeStartAt : fade.fadeStartAt;
+    let fadeEndAt = fade.fadeEndAt;
+    if ('fadeStartAt' in changes || (input.fadeMinutes != null && c.fadeMinutes !== fade.fadeMinutes)) {
+      if (at > 1) return { error: 'locked' };
+      fadeEndAt = fadeStartAt + c.fadeMinutes * MINUTE;
+      if (phase === STATE.FADING) {
+        fadeEndAt = Math.max(fadeEndAt, now + MIN_FADE_REMAINING_MS);
+        Object.assign(changes, rebaseAt(fade, now));
+      }
+      changes.fadeEndAt = fadeEndAt;
+    }
+    if ('fadeEndAt' in changes || (input.whisperMinutes != null && c.whisperMinutes !== fade.whisperMinutes)) {
+      if (at > 2) return { error: 'locked' };
+      changes.muteAt = Math.max(fadeEndAt + c.whisperMinutes * MINUTE, now);
+    }
+    return changes;
   }
 
   // --- Wake --------------------------------------------------------------
@@ -178,18 +303,36 @@
     return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   }
 
+  /** "11:12 am" — the lower-case style used in the popup. */
+  function formatClockShort(ms) {
+    return formatClock(ms).replace(/\s?([AP]M)$/i, (_m, ampm) => ' ' + ampm.toLowerCase());
+  }
+
+  /** "7:30 am, Fri Oct 30" */
+  function formatWakeShort(ms) {
+    const date = new Date(ms).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    return `${formatClockShort(ms)}, ${date.replace(/,/g, '')}`;
+  }
+
   /**
-   * Refuses schedules where the wake alarm would ring before the fade has
-   * finished muting the video (PRD §5). Returns null when the schedule is fine.
+   * Checks a wake time: it must be in the next 24 hours and, when a fade is
+   * still running, after the video goes silent (PRD §5). Returns null when OK.
    */
-  function validateSchedule({ muteAt, wakeAt }) {
-    if (muteAt == null || wakeAt == null || wakeAt > muteAt) return null;
-    return {
-      code: 'wake-before-fade-ends',
-      message:
-        `Your wake time (${formatClock(wakeAt)}) comes before the fade finishes ` +
-        `(${formatClock(muteAt)}). Choose a later wake time or a shorter fade countdown.`,
-    };
+  function validateWakeAt(at, now, muteAt) {
+    if (at == null || Number.isNaN(at)) return { code: 'bad-input', message: 'Choose a wake time.' };
+    if (at <= now + 30 * SECOND) return { code: 'past', message: 'That wake time has already passed.' };
+    if (at > now + WAKE_MAX_AHEAD_MS) {
+      return { code: 'too-far', message: 'Choose a wake time within the next 24 hours.' };
+    }
+    if (muteAt != null && at <= muteAt) {
+      return {
+        code: 'wake-before-fade-ends',
+        message:
+          `The alarm (${formatClockShort(at)}) would ring before the video goes silent ` +
+          `(${formatClockShort(muteAt)}). Choose a later wake time or a shorter fade.`,
+      };
+    }
+    return null;
   }
 
   /** Alarm volume `elapsedMs` into a ring: a dB-linear rise over WAKE_RAMP_MS. */
@@ -213,47 +356,38 @@
 
   // --- Session summary ---------------------------------------------------
 
+  function fadeIsOn(fade) {
+    return !!fade && (fade.status === FADE.ACTIVE || fade.status === FADE.OVERRIDDEN);
+  }
+
+  function wakeIsOn(wake) {
+    return !!wake && (isWakePending(wake) || wake.status === WAKE.RINGING);
+  }
+
+  /** The fade still has a step ahead of it (it hasn't reached silence). */
   function fadeIsPending(fade, now) {
     return !!fade && fade.status === FADE.ACTIVE && now < fade.muteAt;
   }
 
-  /**
-   * True once nothing else is scheduled: the fade has muted (or is no longer
-   * running) and any wake alarm has been dismissed, expired or missed.
-   */
-  function isSessionFinished(session, now) {
-    if (!session) return true;
-    const wake = session.wake;
-    if (wake && (isWakePending(wake) || wake.status === WAKE.RINGING)) return false;
-    return !fadeIsPending(session.fade, now) && !(session.fade && session.fade.status === FADE.OVERRIDDEN);
-  }
-
-  /** Derives the overall state (PRD §8) from the session's parts. */
+  /** Derives the overall state (PRD §8) and what each switch is doing. */
   function describeSession(session, now) {
-    if (!session) {
-      return { state: STATE.IDLE, finished: true, fadePhase: null, wakePending: false, needsAttention: false };
-    }
-    const { fade, wake } = session;
+    const fade = session && fadeIsOn(session.fade) ? session.fade : null;
+    const wake = session && wakeIsOn(session.wake) ? session.wake : null;
     const fadePhase = fade ? fadePhaseAt(fade, now) : null;
-    const wakePending = isWakePending(wake);
-    let state;
+    let state = STATE.IDLE;
     if (wake && wake.status === WAKE.RINGING) state = STATE.WAKING;
     else if (wake && wake.status === WAKE.SNOOZED) state = STATE.SNOOZED;
-    else if (wake && wake.status === WAKE.MISSED) state = STATE.MISSED_WAKE;
-    else if (wake && (wake.status === WAKE.DISMISSED || wake.status === WAKE.EXPIRED)) state = STATE.DISMISSED;
-    else if (fade && (fade.status === FADE.ACTIVE || fade.status === FADE.OVERRIDDEN)) state = fadePhase;
-    else if (wakePending) state = STATE.ARMED;
-    else if (fade && fade.status === FADE.LOST) state = STATE.ERROR;
-    else state = STATE.IDLE; // fade cancelled/restored and nothing else scheduled
-    const needsAttention =
-      (!!fade && fade.status === FADE.OVERRIDDEN) ||
-      (session.notices || []).some((n) => n.level === 'warn');
+    else if (fade) state = fadePhase;
+    else if (wake) state = STATE.ARMED;
     return {
       state,
-      finished: isSessionFinished(session, now),
+      fadeOn: !!fade,
       fadePhase,
-      wakePending,
-      needsAttention,
+      fadeOverridden: !!fade && fade.status === FADE.OVERRIDDEN,
+      wakeOn: !!wake,
+      wakeStatus: wake ? wake.status : null,
+      // Something is still scheduled to happen (drives the ☾ badge).
+      pending: fadeIsPending(fade, now) || isWakePending(wake),
     };
   }
 
@@ -265,30 +399,9 @@
     const h = Math.floor(total / 3600);
     const m = Math.floor((total % 3600) / 60);
     const s = total % 60;
-    if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
-    if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+    if (h > 0) return `${h}h ${pad2(m)}m`;
+    if (m > 0) return `${m}m ${pad2(s)}s`;
     return `${s}s`;
-  }
-
-  function startOfDay(ms) {
-    const d = new Date(ms);
-    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  }
-
-  /** "today", "tomorrow" or a short weekday date. */
-  function formatDayLabel(ms, now) {
-    const days = Math.round((startOfDay(ms) - startOfDay(now)) / (24 * 60 * MINUTE));
-    if (days === 0) return 'today';
-    if (days === 1) return 'tomorrow';
-    return new Date(ms).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-  }
-
-  /** "7:00 AM tomorrow (Sat, Oct 31)" — always shows the actual date. */
-  function formatWakeWhen(ms, now) {
-    const date = new Date(ms).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-    const label = formatDayLabel(ms, now);
-    if (label === 'today' || label === 'tomorrow') return `${formatClock(ms)} ${label} (${date})`;
-    return `${formatClock(ms)} ${date}`;
   }
 
   function isYouTubeUrl(url) {
@@ -298,13 +411,16 @@
   return Object.freeze({
     SECOND,
     MINUTE,
-    FADE_START_OPTIONS,
-    DEFAULT_FADE_START_MINUTES,
-    FADE_DURATION_MS,
-    WHISPER_HOLD_MS,
+    HOUR,
+    DELAY_OPTIONS,
+    FADE_OPTIONS,
+    WHISPER_OPTIONS,
+    EXTEND_OPTIONS,
     WHISPER_RATIO,
-    EXTEND_MS,
+    MIN_FADE_REMAINING_MS,
     SNOOZE_MS,
+    WAKE_SHIFT_MS,
+    WAKE_MAX_AHEAD_MS,
     WAKE_RAMP_MS,
     WAKE_RAMP_FLOOR_DB,
     WAKE_AUTO_STOP_MS,
@@ -313,6 +429,7 @@
     TEST_SOUND_MS,
     USER_INPUT_WINDOW_MS,
     SESSION_MAX_AGE_MS,
+    SESSION_VERSION,
     YOUTUBE_ORIGIN,
     YOUTUBE_MATCH,
     DEFAULT_SETTINGS,
@@ -322,22 +439,29 @@
     clamp,
     parseClockTime,
     nextOccurrence,
-    isValidFadeMinutes,
+    clockTimeOf,
+    toDateTimeLocal,
+    parseDateTimeLocal,
+    fadeChoices,
     planFadeTimes,
+    planFadeFromNow,
     fadePhaseAt,
-    fadeGain,
+    fadeGainAt,
     fadeTargetAt,
-    validateSchedule,
+    extendFade,
+    retimeFade,
+    formatClock,
+    formatClockShort,
+    formatWakeShort,
+    validateWakeAt,
     wakeRampVolume,
     isWakePending,
     wakeDueAction,
+    fadeIsOn,
+    wakeIsOn,
     fadeIsPending,
-    isSessionFinished,
     describeSession,
     formatDuration,
-    formatClock,
-    formatDayLabel,
-    formatWakeWhen,
     isYouTubeUrl,
   });
 });

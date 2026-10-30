@@ -9,11 +9,12 @@
 'use strict';
 
 const core = globalThis.SleepyCore;
-const { STATE, FADE, WAKE } = core;
+const { STATE, FADE } = core;
 const $ = (id) => document.getElementById(id);
 
 let session = null;
 let busy = false;
+let wasRinging = false; // this window has seen the alarm ring or snooze
 let backup = null; // { audio, timer, ringId } while this page plays the chime
 let announced = '';
 
@@ -65,9 +66,8 @@ async function act(type) {
   render();
   const res = await send(type);
   busy = false;
-  const error = $('error');
-  error.hidden = res.ok;
-  setText(error, res.ok ? '' : res.message || 'Something went wrong.');
+  $('error').hidden = res.ok;
+  setText($('error'), res.ok ? '' : res.message || 'Something went wrong.');
   if (res.ok && 'session' in res) session = res.session;
   render();
   refocus();
@@ -75,47 +75,42 @@ async function act(type) {
 
 function render() {
   const now = Date.now();
-  setText($('clock'), core.formatClock(now));
+  setText($('clock'), core.formatClockShort(now));
   const d = core.describeSession(session, now);
-  const wake = session && session.wake;
-  const fade = session && session.fade;
+  const wake = d.wakeOn ? session.wake : null;
+  const fade = d.fadeOn ? session.fade : null;
   const ringing = d.state === STATE.WAKING;
   const snoozed = d.state === STATE.SNOOZED;
+  if (ringing || snoozed) wasRinging = true;
 
   let title;
   let sub;
   if (ringing) {
     title = 'Good morning';
-    sub = `Your ${core.formatClock(wake.wakeAt)} SleepyTube alarm`;
+    sub = `Your ${core.formatClockShort(wake.wakeAt)} SleepyTube alarm`;
   } else if (snoozed) {
     title = 'Snoozing';
-    sub = `Rings again at ${core.formatClock(wake.nextRingAt)} (in ${core.formatDuration(wake.nextRingAt - now)}).`;
-  } else if (wake && wake.status === WAKE.DISMISSED) {
+    sub = `Rings again at ${core.formatClockShort(wake.nextRingAt)} (in ${core.formatDuration(wake.nextRingAt - now)}).`;
+  } else if (wasRinging) {
     title = 'Have a lovely day ☀️';
     sub = 'Your wake alarm is off.';
-  } else if (wake && wake.status === WAKE.EXPIRED) {
-    title = 'Alarm stopped';
-    sub = 'It rang for 15 minutes and turned itself off.';
-  } else if (wake && wake.status === WAKE.MISSED) {
-    title = 'Wake alarm missed';
-    sub = 'It could not ring on time, so it was skipped rather than sounding late.';
-  } else if (wake && core.isWakePending(wake)) {
-    title = 'Wake alarm set';
-    sub = `Rings at ${core.formatWakeWhen(wake.nextRingAt, now)}.`;
+  } else if (wake) {
+    title = 'Alarm set';
+    sub = `Rings at ${core.formatWakeShort(wake.nextRingAt)}.`;
   } else {
-    title = 'No wake alarm';
-    sub = 'Nothing is ringing.';
+    title = 'No alarm is ringing';
+    sub = 'Nothing to do here.';
   }
   setText($('title'), title);
   setText($('sub'), sub);
   document.title = ringing ? '⏰ Wake up · SleepyTube' : 'SleepyTube';
   announce(ringing ? 'Wake alarm ringing.' : snoozed ? 'Alarm snoozed.' : '');
 
-  const audioError = $('audio-error');
-  audioError.hidden = !(ringing && wake.audioError);
-  setText(audioError, ringing && wake.audioError ? `The alarm player failed (${wake.audioError}); playing here instead.` : '');
   // Never longer than the alarm's own 15-minute limit, even after a long sleep.
   const withinLimit = ringing && now - wake.ringStartedAt < core.WAKE_AUTO_STOP_MS;
+  const audioError = $('audio-error');
+  audioError.hidden = !(withinLimit && wake.audioError);
+  setText(audioError, withinLimit && wake.audioError ? `The alarm player failed (${wake.audioError}); playing here instead.` : '');
   if (withinLimit && wake.audioError) startBackupAudio(wake, `${session.id}:${wake.ringStartedAt}`);
   else stopBackupAudio();
 
@@ -123,11 +118,10 @@ function render() {
   const after = !ringing && !snoozed;
   $('snooze').hidden = !ringing;
   $('awake').hidden = after;
-  $('awake').classList.toggle('btn-primary', snoozed);
   setText($('awake'), snoozed ? "I'm awake · turn off alarm" : "I'm awake");
   $('restore').hidden = !(after && canRestore);
   $('close').hidden = !after;
-  $('note').hidden = after && !canRestore;
+  $('note').hidden = !canRestore;
   for (const id of ['snooze', 'awake', 'restore']) $(id).disabled = busy;
 }
 

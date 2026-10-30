@@ -1,9 +1,10 @@
 /*
  * SleepyTube service worker.
  *
- * Owns the single active night (PRD R8): persists it in chrome.storage.local,
- * schedules transitions with chrome.alarms, plays the wake chime through an
- * offscreen document and reconciles everything whenever the worker starts.
+ * Owns the single night (PRD R8): the Fade to Sleep and Alarm switches are
+ * two independent parts of one session in chrome.storage.local. Transitions
+ * are scheduled with chrome.alarms, the wake chime plays from an offscreen
+ * document, and everything is reconciled whenever the worker starts.
  * In-memory state is never trusted to survive a restart (PRD R6), and every
  * handler is idempotent, so duplicate alarm events cannot double-ring.
  */
@@ -14,6 +15,8 @@ const { FADE, WAKE, STATE, MINUTE } = core;
 
 const KEY_SESSION = 'session';
 const KEY_SETTINGS = 'settings';
+const KEY_NOTICES = 'notices';
+const MAX_NOTICES = 4;
 
 const ALARM_PREFIX = 'st:';
 const ALARM_FADE = { start: 'st:fade-start', whisper: 'st:fade-whisper', mute: 'st:fade-mute' };
@@ -58,12 +61,12 @@ function fail(code, message) {
   return { ok: false, code, message };
 }
 
-function newId() {
-  return crypto.randomUUID();
-}
+const newId = () => crypto.randomUUID();
+const clock = (ms) => core.formatClockShort(ms);
 
 async function loadSession() {
   const { [KEY_SESSION]: session = null } = await chrome.storage.local.get(KEY_SESSION);
+  if (session && session.v !== core.SESSION_VERSION) return null; // from an older build
   return session;
 }
 
@@ -77,14 +80,38 @@ async function clearSession() {
   await updateBadge(null);
 }
 
+function newSession(now) {
+  return { v: core.SESSION_VERSION, id: newId(), armedAt: now, fade: null, wake: null };
+}
+
+/** Saves the session, or drops it once both switches are off. */
+async function commit(session) {
+  if (!session || (!core.fadeIsOn(session.fade) && !core.wakeIsOn(session.wake))) {
+    await clearSession();
+    session = null;
+  } else {
+    await saveSession(session);
+  }
+  await syncAlarms(session);
+  await syncKeepAwake(session);
+  return session;
+}
+
 async function loadSettings() {
   const { [KEY_SETTINGS]: stored = {} } = await chrome.storage.local.get(KEY_SETTINGS);
   return { ...core.DEFAULT_SETTINGS, ...stored };
 }
 
-function addNotice(session, level, text) {
-  session.notices = (session.notices || []).filter((n) => n.text !== text);
-  session.notices.push({ id: newId(), level, text, at: Date.now() });
+async function loadNotices() {
+  const { [KEY_NOTICES]: notices = [] } = await chrome.storage.local.get(KEY_NOTICES);
+  return notices;
+}
+
+/** Notices outlive the session: "tab closed", "alarm missed", and so on. */
+async function addNotice(text) {
+  const notices = (await loadNotices()).filter((n) => n.text !== text);
+  notices.push({ id: newId(), text, at: Date.now() });
+  await chrome.storage.local.set({ [KEY_NOTICES]: notices.slice(-MAX_NOTICES) });
 }
 
 async function getTab(tabId) {
@@ -124,21 +151,18 @@ async function setVideoSound(tabId, volume, muted) {
   return !!(response && response.ok);
 }
 
-function fadePlan(session) {
-  const f = session.fade;
+function fadePlan(fade) {
   return {
-    sessionId: session.id,
-    fadeStartAt: f.fadeStartAt,
-    fadeEndAt: f.fadeEndAt,
-    muteAt: f.muteAt,
-    startVolume: f.startVolume,
-    startMuted: f.startMuted,
-    status: f.status,
+    sessionId: fade.id,
+    fadeStartAt: fade.fadeStartAt,
+    fadeFromAt: fade.fadeFromAt,
+    fadeFromGain: fade.fadeFromGain,
+    fadeEndAt: fade.fadeEndAt,
+    muteAt: fade.muteAt,
+    startVolume: fade.startVolume,
+    startMuted: fade.startMuted,
+    status: fade.status,
   };
-}
-
-function fadeIsLive(fade) {
-  return !!fade && (fade.status === FADE.ACTIVE || fade.status === FADE.OVERRIDDEN);
 }
 
 /** True once SleepyTube has started changing the video's volume. */
@@ -147,19 +171,35 @@ function fadeHasTouchedVolume(fade, now) {
 }
 
 async function pushPlan(session) {
-  if (!session || !fadeIsLive(session.fade)) return null;
-  return sendToTab(session.fade.tabId, { type: 'st-plan', plan: fadePlan(session) });
+  if (!session || !core.fadeIsOn(session.fade)) return null;
+  return sendToTab(session.fade.tabId, { type: 'st-plan', plan: fadePlan(session.fade) });
+}
+
+/** The time the fade reaches silence, if that's still ahead. */
+function pendingMuteAt(session, now) {
+  return session && core.fadeIsPending(session.fade, now) ? session.fade.muteAt : null;
+}
+
+/** Refuses fade timelines that would still be running when the alarm rings. */
+function checkAgainstWake(session, muteAt) {
+  const wake = session && session.wake;
+  if (!core.isWakePending(wake) || muteAt < wake.nextRingAt) return null;
+  return fail(
+    'wake-before-fade-ends',
+    `That would keep the fade going until ${clock(muteAt)}, after your ${clock(wake.nextRingAt)} alarm. ` +
+      'Choose a shorter fade or a later alarm.',
+  );
 }
 
 // --- Badge -------------------------------------------------------------------
 
 async function updateBadge(session) {
-  const now = Date.now();
-  const d = core.describeSession(session, now);
+  const d = core.describeSession(session, Date.now());
+  const notices = await loadNotices();
   let badge = BADGE.idle;
   if (d.state === STATE.WAKING || d.state === STATE.SNOOZED) badge = BADGE.waking;
-  else if (d.needsAttention || d.state === STATE.MISSED_WAKE || d.state === STATE.ERROR) badge = BADGE.attention;
-  else if (session && !d.finished) badge = BADGE.armed;
+  else if (d.fadeOverridden || notices.length) badge = BADGE.attention;
+  else if (d.pending) badge = BADGE.armed;
   try {
     await chrome.action.setBadgeBackgroundColor({ color: badge.color });
     if (chrome.action.setBadgeTextColor) await chrome.action.setBadgeTextColor({ color: '#ffffff' });
@@ -204,15 +244,11 @@ async function hasPowerPermission() {
   return chrome.permissions.contains({ permissions: ['power'] });
 }
 
-function keepAwakeWanted(session) {
-  const wake = session && session.wake;
-  return !!wake && wake.keepAwake && (core.isWakePending(wake) || wake.status === WAKE.RINGING);
-}
-
-/** Holds a `system` keep-awake only while a wake alarm is pending or ringing. */
+/** Holds a `system` keep-awake only while an alarm is pending or ringing. */
 async function syncKeepAwake(session) {
   if (!chrome.power) return; // permission not granted: nothing is held
-  if (keepAwakeWanted(session)) chrome.power.requestKeepAwake('system');
+  const wake = session && session.wake;
+  if (core.wakeIsOn(wake) && wake.keepAwake) chrome.power.requestKeepAwake('system');
   else chrome.power.releaseKeepAwake();
 }
 
@@ -299,7 +335,7 @@ async function stopWakeAudio() {
 // --- Wake UI: window + notification ------------------------------------------
 
 async function showWakeNotification(session, { audible }) {
-  const at = core.formatClock(session.wake.wakeAt);
+  const at = clock(session.wake.wakeAt);
   try {
     await chrome.notifications.create(NOTIFY_WAKE, {
       type: 'basic',
@@ -350,7 +386,7 @@ async function openWakeWindow(session) {
       url: chrome.runtime.getURL(WAKE_PAGE_URL),
       type: 'popup',
       width: 460,
-      height: 600,
+      height: 640,
       focused: true,
     });
     wake.windowId = win.id;
@@ -362,14 +398,19 @@ async function openWakeWindow(session) {
 
 async function focusWakeUi() {
   const session = await loadSession();
-  if (session && session.wake) await openWakeWindow(session);
+  if (session && core.wakeIsOn(session.wake)) await openWakeWindow(session);
 }
 
 // --- Transitions ---------------------------------------------------------------
 
+/** A fade the user paused (by changing the volume) is moot once it's morning. */
+function settlePausedFade(session) {
+  if (session.fade && session.fade.status === FADE.OVERRIDDEN) session.fade = null;
+}
+
 async function startRinging(session, now) {
   const wake = session.wake;
-  settlePausedFade(session); // a fade paused overnight is moot once it's morning
+  settlePausedFade(session);
   wake.status = WAKE.RINGING;
   wake.ringStartedAt = now;
   wake.firstRangAt = wake.firstRangAt || now;
@@ -382,59 +423,45 @@ async function startRinging(session, now) {
   await openWakeWindow(session);
 }
 
-async function markMissed(session, now) {
-  const wake = session.wake;
-  const at = core.formatClock(wake.nextRingAt);
-  wake.status = WAKE.MISSED;
-  wake.missedAt = now;
-  addNotice(
-    session,
-    'warn',
-    `SleepyTube missed your ${at} wake alarm because Chrome or the computer was asleep. ` +
-      'It does not ring late. Keep a separate alarm as backup.',
-  );
-  await saveSession(session);
-  await showInfoNotification('Wake alarm missed', `Your ${at} alarm could not ring on time, so it was skipped.`);
-}
-
-/** Once the alarm is over, a fade the user paused has nothing left to resume. */
-function settlePausedFade(session) {
-  if (session.fade && session.fade.status === FADE.OVERRIDDEN) session.fade.status = FADE.CANCELLED;
-}
-
-async function expireRinging(session, now) {
+/** Ends the alarm part of the night (dismissed, expired or missed). */
+async function endWake(session) {
   settlePausedFade(session);
-  session.wake.status = WAKE.EXPIRED;
-  session.wake.endedAt = now;
-  await saveSession(session);
+  session.wake = null;
+  const remaining = await commit(session);
   await stopWakeAudio();
   await clearWakeNotification();
-  await showInfoNotification('Wake alarm stopped', 'The alarm rang for 15 minutes and has been turned off.');
+  return remaining;
 }
 
-/** The fade's tab closed or left YouTube: cancel only the fade (PRD R7). */
+async function markMissed(session) {
+  const at = clock(session.wake.nextRingAt);
+  await addNotice(
+    `SleepyTube missed your ${at} alarm because Chrome or the computer was asleep. ` +
+      'It never rings late, so keep a separate alarm as backup.',
+  );
+  await showInfoNotification('Wake alarm missed', `Your ${at} alarm could not ring on time, so it was skipped.`);
+  return endWake(session);
+}
+
+async function expireRinging(session) {
+  await addNotice('Your wake alarm rang for 15 minutes and turned itself off.');
+  await showInfoNotification('Wake alarm stopped', 'The alarm rang for 15 minutes and has been turned off.');
+  return endWake(session);
+}
+
+/** The fade's tab closed or left YouTube: switch only the fade off (PRD R7). */
 async function markFadeLost(session, reason, now) {
   const fade = session.fade;
   const wasPending = fade.status === FADE.OVERRIDDEN || now < fade.muteAt;
-  fade.status = FADE.LOST;
-  fade.lostAt = now;
-  if (!wasPending) {
-    // The fade had already finished; closing the tab afterwards is normal.
-    // Keep the night if it still has something to tell the user (e.g. a missed alarm).
-    const hasWarning = (session.notices || []).some((n) => n.level === 'warn');
-    if (core.isSessionFinished(session, now) && !hasWarning) {
-      await clearSession();
-      return null;
-    }
-    await saveSession(session);
-    return session;
+  session.fade = null;
+  if (wasPending) {
+    const where = reason === 'closed' ? 'The YouTube tab was closed' : 'The YouTube tab left YouTube';
+    const wakeNote = core.wakeIsOn(session.wake) ? ' Your alarm is still set.' : '';
+    await addNotice(`${where}, so the fade stopped.${wakeNote}`);
+    await showInfoNotification('Fade stopped', `${where}, so the fade stopped.${wakeNote}`);
   }
-  const where = reason === 'closed' ? 'The YouTube tab was closed' : 'The YouTube tab left YouTube';
-  const wakeNote = core.isWakePending(session.wake) ? ' Your wake alarm is still set.' : '';
-  addNotice(session, 'warn', `${where}, so tonight's fade was cancelled.${wakeNote}`);
-  await saveSession(session);
-  await showInfoNotification('Fade cancelled', `${where}, so the fade stopped.${wakeNote}`);
-  return session;
+  // Closing the tab after the video went silent is normal: nothing to report.
+  return commit(session);
 }
 
 /**
@@ -459,28 +486,26 @@ async function reconcile() {
 
   const wake = session.wake;
   const due = core.wakeDueAction(wake, now);
-  if (due === 'missed') await markMissed(session, now);
+  if (due === 'missed') session = await markMissed(session);
   else if (due === 'ring') await startRinging(session, now);
   else if (wake && wake.status === WAKE.RINGING) {
-    if (now - wake.ringStartedAt >= core.WAKE_AUTO_STOP_MS) await expireRinging(session, now);
+    if (now - wake.ringStartedAt >= core.WAKE_AUTO_STOP_MS) session = await expireRinging(session);
     else await ensureWakeAudio(session);
   }
 
-  if (fadeIsLive(session.fade)) {
+  if (session && core.fadeIsOn(session.fade)) {
     const tab = await getTab(session.fade.tabId);
-    if (!tab || !core.isYouTubeUrl(tab.url)) {
-      session = await markFadeLost(session, tab ? 'left' : 'closed', now);
-    }
+    if (!tab || !core.isYouTubeUrl(tab.url)) session = await markFadeLost(session, tab ? 'left' : 'closed', now);
   }
 
-  if (session) await updateBadge(session);
+  await updateBadge(session);
   await syncAlarms(session);
   await syncKeepAwake(session);
   if (session) await pushPlan(session);
   return session;
 }
 
-/** Ends the night entirely (Cancel night / Done / replacement). */
+/** Ends the night entirely (cleanup, expiry). */
 async function endSession(session, { restore }) {
   await clearSession();
   await syncAlarms(null);
@@ -488,87 +513,148 @@ async function endSession(session, { restore }) {
   await stopWakeAudio();
   await clearWakeNotification();
   const fade = session && session.fade;
-  if (fadeIsLive(fade)) {
+  if (core.fadeIsOn(fade)) {
     const restored = restore && (await setVideoSound(fade.tabId, fade.originalVolume, fade.originalMuted));
     if (!restored) await sendToTab(fade.tabId, { type: 'st-clear' });
   }
 }
 
-// --- Actions (popup, wake page, notifications) -------------------------------
+// --- Fade to Sleep -----------------------------------------------------------------
 
-async function getStatus() {
-  const session = await reconcile();
-  return { ok: true, session, settings: await loadSettings() };
-}
-
-async function arm({ tabId, fadeMinutes, wake, replace }) {
+async function fadeOn({ tabId, delayMinutes, fadeMinutes, whisperMinutes }) {
   const now = Date.now();
-  fadeMinutes = Number(fadeMinutes);
-  if (!core.isValidFadeMinutes(fadeMinutes)) return fail('bad-input', 'Choose when the fade should begin.');
-
-  const times = core.planFadeTimes(now, fadeMinutes * MINUTE);
-  let wakeAt = null;
-  if (wake && wake.enabled) {
-    wakeAt = core.nextOccurrence(wake.time, now);
-    if (wakeAt == null) return fail('bad-input', 'Choose a wake time.');
-    const problem = core.validateSchedule({ muteAt: times.muteAt, wakeAt });
-    if (problem) return fail(problem.code, problem.message);
-    if (wake.keepAwake && !(await hasPowerPermission())) {
-      return fail('needs-power', 'Allow SleepyTube to keep the computer awake, or turn that option off.');
-    }
+  const session = (await loadSession()) || newSession(now);
+  if (core.fadeIsOn(session.fade)) {
+    if (session.fade.tabId === tabId) return { ok: true, session };
+    return fail('fade-elsewhere', 'Fade to Sleep is already on for another tab. Switch it off there first.');
   }
+  const times = core.planFadeTimes(now, { delayMinutes, fadeMinutes, whisperMinutes });
+  const conflict = checkAgainstWake(session, times.muteAt);
+  if (conflict) return conflict;
 
-  const existing = await loadSession();
-  if (existing && !core.isSessionFinished(existing, now) && !replace) {
-    return fail('needs-replace', 'A night is already set. Replace it?');
-  }
-
-  const check = await probeTab(tabId);
-  if (!check.hasVideo) return fail('no-video', 'Open a YouTube video first');
-
-  if (existing) {
-    // Replacing on the same tab: put its sound back before snapshotting. A
-    // video in another tab is left as it is rather than turned up at night.
-    const restore =
-      fadeHasTouchedVolume(existing.fade, now) &&
-      existing.fade.tabId === tabId &&
-      !(existing.wake && existing.wake.firstRangAt);
-    await endSession(existing, { restore });
-  }
   const snapshot = await probeTab(tabId);
   if (!snapshot.hasVideo) return fail('no-video', 'Open a YouTube video first');
 
-  const session = {
+  session.fade = {
     id: newId(),
-    armedAt: now,
-    fade: {
-      tabId,
-      fadeMinutes,
-      ...times,
-      startVolume: snapshot.volume,
-      startMuted: snapshot.muted,
-      originalVolume: snapshot.volume,
-      originalMuted: snapshot.muted,
-      status: FADE.ACTIVE,
-    },
-    wake: wakeAt == null ? null : newWake(wake, wakeAt),
-    notices: [],
+    tabId,
+    ...times,
+    startVolume: snapshot.volume,
+    startMuted: snapshot.muted,
+    originalVolume: snapshot.volume,
+    originalMuted: snapshot.muted,
+    status: FADE.ACTIVE,
   };
-  await saveSession(session);
-  await syncAlarms(session);
-  await syncKeepAwake(session);
-  await pushPlan(session);
-  return { ok: true, session };
+  const saved = await commit(session);
+  await pushPlan(saved);
+  return { ok: true, session: saved };
 }
 
-function newWake(input, wakeAt) {
+/**
+ * Switching the fade off (or its Cancel button) is a deliberate act, so the
+ * video's original sound comes back — unless the user already set their own
+ * volume, which is left alone.
+ */
+async function fadeOff() {
+  const session = await loadSession();
+  const fade = session && session.fade;
+  if (!core.fadeIsOn(fade)) return { ok: true, session };
+  if (fadeHasTouchedVolume(fade, Date.now())) {
+    const restored = await setVideoSound(fade.tabId, fade.originalVolume, fade.originalMuted);
+    if (!restored) await sendToTab(fade.tabId, { type: 'st-clear' });
+  } else {
+    await sendToTab(fade.tabId, { type: 'st-clear' });
+  }
+  session.fade = null;
+  return { ok: true, session: await commit(session) };
+}
+
+/** Applies timeline changes after checking them against the alarm. */
+async function applyFadeChanges(session, changes) {
+  const fade = session.fade;
+  const muteAt = changes.muteAt != null ? changes.muteAt : fade.muteAt;
+  if (fade.status === FADE.ACTIVE && muteAt !== fade.muteAt) {
+    const conflict = checkAgainstWake(session, muteAt);
+    if (conflict) return conflict;
+  }
+  Object.assign(fade, changes);
+  const saved = await commit(session);
+  await pushPlan(saved);
+  return { ok: true, session: saved };
+}
+
+async function fadeRetime(input) {
+  const session = await loadSession();
+  const fade = session && session.fade;
+  if (!core.fadeIsOn(fade)) return fail('fade-off', 'Fade to Sleep is off.');
+  if (fade.status === FADE.OVERRIDDEN) {
+    // Paused: just remember the choice for when the fade resumes.
+    return applyFadeChanges(session, core.fadeChoices({ ...fade, ...input }));
+  }
+  const changes = core.retimeFade(fade, input, Date.now());
+  if (changes.error) return fail('locked', 'That part of the fade has already started.');
+  return applyFadeChanges(session, changes);
+}
+
+async function fadeExtend({ minutes }) {
+  if (!core.EXTEND_OPTIONS.includes(Number(minutes))) return fail('bad-input', 'Choose +10 or +20.');
+  const session = await loadSession();
+  const fade = session && session.fade;
+  if (!core.fadeIsOn(fade)) return fail('fade-off', 'Fade to Sleep is off.');
+  if (fade.status === FADE.OVERRIDDEN) return fail('paused', 'Resume the fade first.');
+  const changes = core.extendFade(fade, minutes, Date.now());
+  if (changes.error) return fail('silent', 'The video is already silent. Use Restart to start over.');
+  return applyFadeChanges(session, changes);
+}
+
+/** Restart: bring the starting volume back and count down again from now. */
+async function fadeRestart() {
+  const session = await loadSession();
+  const fade = session && session.fade;
+  if (!core.fadeIsOn(fade)) return fail('fade-off', 'Fade to Sleep is off.');
+  const now = Date.now();
+  const times = core.planFadeTimes(now, fade);
+  const conflict = checkAgainstWake(session, times.muteAt);
+  if (conflict) return conflict;
+  if (fade.status === FADE.OVERRIDDEN) {
+    const current = await probeTab(fade.tabId);
+    if (!current.hasVideo) return fail('no-video', 'SleepyTube cannot reach the YouTube video right now.');
+    fade.startVolume = current.volume;
+    fade.startMuted = current.muted;
+  } else if (fadeHasTouchedVolume(fade, now)) {
+    await setVideoSound(fade.tabId, fade.startVolume, fade.startMuted);
+  }
+  Object.assign(fade, times, { status: FADE.ACTIVE });
+  const saved = await commit(session);
+  await pushPlan(saved);
+  return { ok: true, session: saved };
+}
+
+/** Resume after an override: fade again from the user's volume, starting now. */
+async function fadeResume() {
+  const session = await loadSession();
+  const fade = session && session.fade;
+  if (!fade || fade.status !== FADE.OVERRIDDEN) return { ok: true, session };
+  const times = core.planFadeFromNow(Date.now(), fade);
+  const conflict = checkAgainstWake(session, times.muteAt);
+  if (conflict) return conflict;
+  const current = await probeTab(fade.tabId);
+  if (!current.hasVideo) return fail('no-video', 'SleepyTube cannot reach the YouTube video right now.');
+  Object.assign(fade, times, { startVolume: current.volume, startMuted: current.muted, status: FADE.ACTIVE });
+  const saved = await commit(session);
+  await pushPlan(saved);
+  return { ok: true, session: saved };
+}
+
+// --- Alarm -----------------------------------------------------------------------
+
+function newWake(at, { keepAwake, volume }) {
   return {
-    time: input.time,
-    wakeAt,
-    nextRingAt: wakeAt,
+    wakeAt: at,
+    nextRingAt: at,
     status: WAKE.SCHEDULED,
-    keepAwake: !!input.keepAwake,
-    volume: core.clamp(Number(input.volume) || core.DEFAULT_SETTINGS.wakeVolume, 0.05, 1),
+    keepAwake: !!keepAwake,
+    volume: core.clamp(Number(volume) || core.DEFAULT_SETTINGS.wakeVolume, 0.05, 1),
     snoozeCount: 0,
     ringStartedAt: null,
     firstRangAt: null,
@@ -577,150 +663,63 @@ function newWake(input, wakeAt) {
   };
 }
 
-async function cancelNight() {
-  const session = await loadSession();
-  if (!session) return { ok: true, session: null };
+async function alarmOn({ at }) {
   const now = Date.now();
-  // Cancelling is a deliberate act, so the video's sound comes back — unless
-  // the wake alarm has already rung (then "Restore video sound" is separate).
-  const restore = fadeHasTouchedVolume(session.fade, now) && !(session.wake && session.wake.firstRangAt);
-  await endSession(session, { restore });
-  await closeWakeWindow(session);
-  return { ok: true, session: null };
+  const settings = await loadSettings();
+  const wakeAt = at != null ? Number(at) : core.nextOccurrence(settings.wakeTime, now);
+  const session = (await loadSession()) || newSession(now);
+  if (core.wakeIsOn(session.wake)) return { ok: true, session };
+  const problem = core.validateWakeAt(wakeAt, now, pendingMuteAt(session, now));
+  if (problem) return fail(problem.code, problem.message);
+  const keepAwake = settings.keepAwake && (await hasPowerPermission());
+  session.wake = newWake(wakeAt, { keepAwake, volume: settings.wakeVolume });
+  return { ok: true, session: await commit(session) };
 }
 
-async function closeWakeWindow(session) {
-  const id = session && session.wake && session.wake.windowId;
-  if (id == null) return;
-  try {
-    await chrome.windows.remove(id);
-  } catch {
-    // Already closed.
-  }
-}
-
-/** "Done": forget a finished night, leaving the video exactly as it is. */
-async function finishNight() {
+/** Switching the alarm off (or its Cancel button); while ringing, = I'm awake. */
+async function alarmOff() {
   const session = await loadSession();
-  if (session) {
-    await endSession(session, { restore: false });
-    await closeWakeWindow(session);
-  }
-  return { ok: true, session: null };
+  if (!session || !core.wakeIsOn(session.wake)) return { ok: true, session };
+  return { ok: true, session: await endWake(session) };
 }
 
-async function extendFade() {
-  const session = await loadSession();
+async function setWakeTime(session, at) {
+  const wake = session && session.wake;
+  if (!core.wakeIsOn(wake)) return fail('alarm-off', 'The alarm is off.');
+  if (wake.status !== WAKE.SCHEDULED) return fail('ringing', "Use Snooze or I'm awake first.");
   const now = Date.now();
-  const fade = session && session.fade;
-  if (!fadeIsLive(fade)) return fail('no-fade', 'There is no fade to extend.');
-
-  const beforeFade = fade.status === FADE.ACTIVE && now < fade.fadeStartAt;
-  const times = beforeFade
-    ? {
-        fadeStartAt: fade.fadeStartAt + core.EXTEND_MS,
-        fadeEndAt: fade.fadeEndAt + core.EXTEND_MS,
-        muteAt: fade.muteAt + core.EXTEND_MS,
-      }
-    : core.planFadeTimes(now, core.EXTEND_MS);
-  if (core.isWakePending(session.wake)) {
-    const problem = core.validateSchedule({ muteAt: times.muteAt, wakeAt: session.wake.nextRingAt });
-    if (problem) return fail(problem.code, 'Adding 15 minutes would finish the fade after your wake alarm.');
-  }
-
-  if (!beforeFade) {
-    // Fading (or paused by the user): bring the listening volume back and
-    // count down again from there.
-    if (fade.status === FADE.ACTIVE) {
-      await setVideoSound(fade.tabId, fade.startVolume, fade.startMuted);
-    } else {
-      const current = await probeTab(fade.tabId);
-      if (!current.hasVideo) return fail('no-video', 'SleepyTube cannot reach the YouTube video right now.');
-      fade.startVolume = current.volume;
-      fade.startMuted = current.muted;
-    }
-  }
-  Object.assign(fade, times, { status: FADE.ACTIVE });
-  await saveSession(session);
-  await syncAlarms(session);
-  await pushPlan(session);
-  return { ok: true, session };
+  const problem = core.validateWakeAt(at, now, pendingMuteAt(session, now));
+  if (problem) return fail(problem.code, problem.message);
+  wake.wakeAt = wake.nextRingAt = at;
+  return { ok: true, session: await commit(session) };
 }
 
-async function resumeFade() {
-  const session = await loadSession();
-  const fade = session && session.fade;
-  if (!fade || fade.status !== FADE.OVERRIDDEN) return { ok: true, session };
-  const times = core.planFadeTimes(Date.now(), 0);
-  if (core.isWakePending(session.wake)) {
-    const problem = core.validateSchedule({ muteAt: times.muteAt, wakeAt: session.wake.nextRingAt });
-    if (problem) return fail(problem.code, 'Fading again takes 15 minutes, which would run past your wake alarm. Cancel the fade instead.');
-  }
-  const current = await probeTab(fade.tabId);
-  if (!current.hasVideo) return fail('no-video', 'SleepyTube cannot reach the YouTube video right now.');
-  // Fade again from the volume the user chose, starting now.
-  Object.assign(fade, times, {
-    startVolume: current.volume,
-    startMuted: current.muted,
-    status: FADE.ACTIVE,
-  });
-  await saveSession(session);
-  await syncAlarms(session);
-  await pushPlan(session);
-  return { ok: true, session };
+async function alarmSet({ at }) {
+  return setWakeTime(await loadSession(), Number(at));
 }
 
-async function cancelFade() {
+async function alarmShift({ minutes }) {
   const session = await loadSession();
-  const fade = session && session.fade;
-  if (!fadeIsLive(fade)) return { ok: true, session };
-  fade.status = FADE.CANCELLED;
-  await sendToTab(fade.tabId, { type: 'st-clear' });
-  const wake = session.wake;
-  if (!wake || !(core.isWakePending(wake) || wake.status === WAKE.RINGING)) {
-    await endSession(session, { restore: false });
-    return { ok: true, session: null };
-  }
-  await saveSession(session);
-  await syncAlarms(session);
-  return { ok: true, session };
+  if (!session || !core.wakeIsOn(session.wake)) return fail('alarm-off', 'The alarm is off.');
+  return setWakeTime(session, session.wake.nextRingAt + Number(minutes) * MINUTE);
 }
 
-async function updateWake({ enabled, time, keepAwake, volume }) {
+/** Keep-awake and alarm volume, from the Limitations panel. */
+async function alarmOptions({ keepAwake, volume }) {
   const session = await loadSession();
-  if (!session) return fail('no-session', 'No night is set.');
-  const now = Date.now();
-  const wake = session.wake;
-  if (wake && (wake.status === WAKE.RINGING || wake.status === WAKE.SNOOZED)) {
-    return fail('ringing', "Use Snooze or I'm awake first.");
-  }
-  if (!enabled) {
-    session.wake = null;
-  } else {
-    const wakeAt = core.nextOccurrence(time, now);
-    if (wakeAt == null) return fail('bad-input', 'Choose a wake time.');
-    if (core.fadeIsPending(session.fade, now)) {
-      const problem = core.validateSchedule({ muteAt: session.fade.muteAt, wakeAt });
-      if (problem) return fail(problem.code, problem.message);
-    }
-    if (keepAwake && !(await hasPowerPermission())) {
-      return fail('needs-power', 'Allow SleepyTube to keep the computer awake, or turn that option off.');
-    }
-    session.wake = { ...newWake({ time, keepAwake, volume }, wakeAt), windowId: wake ? wake.windowId : null };
-  }
-  await saveSession(session);
-  await syncAlarms(session);
-  await syncKeepAwake(session);
-  return { ok: true, session };
+  const wake = session && session.wake;
+  if (!core.wakeIsOn(wake)) return { ok: true, session };
+  if (keepAwake != null) wake.keepAwake = !!keepAwake && (await hasPowerPermission());
+  if (volume != null) wake.volume = core.clamp(Number(volume), 0.05, 1);
+  return { ok: true, session: await commit(session) };
 }
 
 async function snooze() {
   const session = await loadSession();
   const wake = session && session.wake;
   if (!wake || wake.status !== WAKE.RINGING) return { ok: true, session };
-  const now = Date.now();
   wake.status = WAKE.SNOOZED;
-  wake.nextRingAt = now + core.SNOOZE_MS;
+  wake.nextRingAt = Date.now() + core.SNOOZE_MS;
   wake.snoozeCount = (wake.snoozeCount || 0) + 1;
   wake.ringStartedAt = null;
   await saveSession(session);
@@ -730,50 +729,15 @@ async function snooze() {
   return { ok: true, session };
 }
 
+/** I'm awake: the alarm stops. The video's sound is never restored here (PRD §4). */
 async function dismiss() {
   const session = await loadSession();
   const wake = session && session.wake;
   if (!wake || !(wake.status === WAKE.RINGING || wake.status === WAKE.SNOOZED)) return { ok: true, session };
-  settlePausedFade(session);
-  wake.status = WAKE.DISMISSED;
-  wake.endedAt = Date.now();
-  // Dismissing never restores the video's sound (PRD §4).
-  await saveSession(session);
-  await syncAlarms(session);
-  await syncKeepAwake(session);
-  await stopWakeAudio();
-  await clearWakeNotification();
-  return { ok: true, session };
+  return { ok: true, session: await endWake(session) };
 }
 
-async function restoreSound() {
-  const session = await loadSession();
-  const fade = session && session.fade;
-  if (!fadeIsLive(fade)) return fail('nothing-to-restore', 'There is no video sound to restore.');
-  const ok = await setVideoSound(fade.tabId, fade.originalVolume, fade.originalMuted);
-  if (!ok) return fail('unreachable', 'SleepyTube cannot reach the YouTube video. Is the tab still open?');
-  fade.status = FADE.RESTORED;
-  if (core.isSessionFinished(session, Date.now())) {
-    await endSession(session, { restore: false });
-    return { ok: true, session: null };
-  }
-  await saveSession(session);
-  await syncAlarms(session);
-  return { ok: true, session };
-}
-
-async function dismissNotice({ id }) {
-  const session = await loadSession();
-  if (!session) return { ok: true, session: null };
-  session.notices = (session.notices || []).filter((n) => n.id !== id);
-  const d = core.describeSession(session, Date.now());
-  if (d.finished && (d.state === STATE.ERROR || d.state === STATE.IDLE) && session.notices.length === 0) {
-    await endSession(session, { restore: false });
-    return { ok: true, session: null };
-  }
-  await saveSession(session);
-  return { ok: true, session };
-}
+// --- Test sound, notices ------------------------------------------------------------
 
 async function testSound({ volume }) {
   const session = await loadSession();
@@ -809,20 +773,32 @@ async function onOffscreenEnded({ mode }) {
   return reconcile(); // a ring hit its safety cap; reconcile expires it
 }
 
+async function dismissNotice({ id }) {
+  const notices = (await loadNotices()).filter((n) => n.id !== id);
+  await chrome.storage.local.set({ [KEY_NOTICES]: notices });
+  await updateBadge(await loadSession());
+  return { ok: true };
+}
+
+async function getStatus() {
+  const session = await reconcile();
+  return { ok: true, session, notices: await loadNotices(), settings: await loadSettings() };
+}
+
 // --- Content script reports --------------------------------------------------
 
 function fadeFor(session, sender, sessionId) {
   const fade = session && session.fade;
-  if (!fade || !sender.tab || sender.tab.id !== fade.tabId) return null;
-  if (sessionId && sessionId !== session.id) return null;
+  if (!core.fadeIsOn(fade) || !sender.tab || sender.tab.id !== fade.tabId) return null;
+  if (sessionId && sessionId !== fade.id) return null;
   return fade;
 }
 
 async function onContentReady(sender) {
   const session = await loadSession();
   const fade = fadeFor(session, sender);
-  if (!fadeIsLive(fade) || sender.frameId !== 0) return { plan: null };
-  return { plan: fadePlan(session) };
+  if (!fade || sender.frameId !== 0) return { plan: null };
+  return { plan: fadePlan(fade) };
 }
 
 async function onOverride(message, sender) {
@@ -831,22 +807,16 @@ async function onOverride(message, sender) {
   if (!fade || fade.status !== FADE.ACTIVE) return { ok: true };
   const now = Date.now();
   const wake = session.wake;
-  const wakeAhead = !!wake && (core.isWakePending(wake) || wake.status === WAKE.RINGING);
-  if (now >= fade.muteAt && (!wakeAhead || wake.firstRangAt)) {
-    // The fade finished and either nothing else is scheduled or the alarm has
-    // already rung: the user turning the sound back up is them taking over.
-    fade.status = FADE.RESTORED;
-    if (!wakeAhead) {
-      await endSession(session, { restore: false });
-      return { ok: true };
-    }
-    await saveSession(session);
+  if (now >= fade.muteAt && (!core.wakeIsOn(wake) || wake.firstRangAt)) {
+    // The video was already silent and nothing else is coming, or the alarm
+    // has rung: the user turning the sound up is them taking over.
+    session.fade = null;
+    await commit(session);
     return { ok: true };
   }
   fade.status = FADE.OVERRIDDEN;
   fade.overriddenAt = now;
-  await saveSession(session);
-  await syncAlarms(session);
+  await commit(session);
   return { ok: true };
 }
 
@@ -869,16 +839,20 @@ async function onBaseline(message, sender) {
 const handlers = {
   'get-status': () => getStatus(),
   'probe-tab': (m) => probeTab(m.tabId),
-  arm: (m) => arm(m),
-  'cancel-night': () => cancelNight(),
-  'finish-night': () => finishNight(),
-  'extend-fade': () => extendFade(),
-  'resume-fade': () => resumeFade(),
-  'cancel-fade': () => cancelFade(),
-  'update-wake': (m) => updateWake(m),
+  'fade-on': (m) => fadeOn(m),
+  'fade-off': () => fadeOff(),
+  'fade-retime': (m) => fadeRetime(m),
+  'fade-extend': (m) => fadeExtend(m),
+  'fade-restart': () => fadeRestart(),
+  'fade-resume': () => fadeResume(),
+  'restore-sound': () => fadeOff(),
+  'alarm-on': (m) => alarmOn(m),
+  'alarm-off': () => alarmOff(),
+  'alarm-set': (m) => alarmSet(m),
+  'alarm-shift': (m) => alarmShift(m),
+  'alarm-options': (m) => alarmOptions(m),
   snooze: () => snooze(),
   dismiss: () => dismiss(),
-  'restore-sound': () => restoreSound(),
   'dismiss-notice': (m) => dismissNotice(m),
   'test-sound': (m) => testSound(m),
   'stop-test': () => stopTest(),
@@ -905,9 +879,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   serialized(async () => {
     const session = await loadSession();
-    if (session && fadeIsLive(session.fade) && session.fade.tabId === tabId) {
-      const remaining = await markFadeLost(session, 'closed', Date.now());
-      await syncAlarms(remaining);
+    if (session && core.fadeIsOn(session.fade) && session.fade.tabId === tabId) {
+      await markFadeLost(session, 'closed', Date.now());
     }
   });
 });
@@ -957,18 +930,24 @@ chrome.runtime.onStartup.addListener(() => serialized(reconcile));
 serialized(reconcile);
 
 // --- QA helper (service worker console) ----------------------------------------
-// sleepyDebug.fastForward(20) moves the active night 20 minutes forward in time,
-// e.g. to reach the fade or the wake alarm without waiting.
+// sleepyDebug.fastForward(20) moves the night 20 minutes forward in time, e.g.
+// to reach the fade or the wake alarm without waiting.
 self.sleepyDebug = {
   session: loadSession,
+  notices: loadNotices,
   reconcile: () => serialized(reconcile),
-  // Forget tonight's session without touching the video.
+  // Forget tonight's session (and notices) without touching the video.
   reset: () =>
     serialized(async () => {
+      await chrome.storage.local.remove(KEY_NOTICES);
       const session = await loadSession();
-      if (!session) return;
+      if (!session) {
+        await updateBadge(null);
+        return;
+      }
       await endSession(session, { restore: false });
-      await closeWakeWindow(session);
+      const id = session.wake && session.wake.windowId;
+      if (id != null) await chrome.windows.remove(id).catch(() => {});
     }),
   fastForward: (minutes) =>
     serialized(async () => {
@@ -977,7 +956,11 @@ self.sleepyDebug = {
       const ms = minutes * MINUTE;
       session.armedAt -= ms;
       const fade = session.fade;
-      if (fade) for (const k of ['fadeStartAt', 'fadeEndAt', 'muteAt']) fade[k] -= ms;
+      if (fade) {
+        for (const k of ['delayStartedAt', 'fadeStartAt', 'fadeFromAt', 'fadeEndAt', 'muteAt']) {
+          if (fade[k] != null) fade[k] -= ms;
+        }
+      }
       const wake = session.wake;
       if (wake) {
         for (const k of ['wakeAt', 'nextRingAt', 'ringStartedAt', 'firstRangAt']) {

@@ -159,6 +159,7 @@ async function swEval(context, fn, arg) {
 }
 
 const session = (context) => swEval(context, () => self.sleepyDebug.session());
+const notices = (context) => swEval(context, () => self.sleepyDebug.notices());
 const fastForward = (context, minutes) => swEval(context, (m) => self.sleepyDebug.fastForward(m), minutes);
 const alarms = (context) =>
   swEval(context, async () => Object.fromEntries((await chrome.alarms.getAll()).map((a) => [a.name, a.scheduledTime])));
@@ -179,10 +180,18 @@ async function resetNight(context) {
   });
 }
 
-/** Clock time HH:MM `minutes` from now (rounded up to the next minute). */
-function clockIn(minutes) {
-  const d = new Date(Date.now() + minutes * MINUTE + 60 * 1000);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+/** Sets the alarm time through the popup's date-time picker field. */
+function pickWakeTime(popup, at) {
+  return popup.evaluate((ms) => {
+    const input = document.getElementById('wake-input');
+    input.value = globalThis.SleepyCore.toDateTimeLocal(ms);
+    input.dispatchEvent(new Event('change'));
+  }, at);
+}
+
+/** A whole-minute time `minutes` from now. */
+function minutesFromNow(minutes) {
+  return Math.ceil((Date.now() + minutes * MINUTE) / MINUTE) * MINUTE;
 }
 
 async function waitFor(fn, { timeout = 5000, interval = 100, message = 'condition' } = {}) {
@@ -206,10 +215,12 @@ module.exports = {
   openPopup,
   swEval,
   session,
+  notices,
   fastForward,
   alarms,
   offscreenStatus,
   resetNight,
-  clockIn,
+  pickWakeTime,
+  minutesFromNow,
   waitFor,
 };

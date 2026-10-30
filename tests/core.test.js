@@ -9,12 +9,19 @@ const core = require('../extension/lib/core.js');
 
 const { MINUTE, STATE, FADE, WAKE } = core;
 const at = (y, mo, d, h, mi = 0, s = 0) => new Date(y, mo - 1, d, h, mi, s).getTime();
+const db = (v) => 20 * Math.log10(v);
+const near = (a, b, tol, label) => assert.ok(Math.abs(a - b) <= tol, `${label}: expected ≈${b}, got ${a}`);
 
-test('product constants match the PRD', () => {
-  assert.deepEqual([...core.FADE_START_OPTIONS], [5, 10, 15, 20, 30, 45, 60, 90]);
-  assert.equal(core.DEFAULT_FADE_START_MINUTES, 20);
-  assert.equal(core.FADE_DURATION_MS, 10 * MINUTE);
-  assert.equal(core.WHISPER_HOLD_MS, 5 * MINUTE);
+const NIGHT = at(2026, 10, 30, 23, 0);
+const DEFAULTS = { delayMinutes: 20, fadeMinutes: 10, whisperMinutes: 10 };
+const plan = (choices = DEFAULTS, from = NIGHT) => ({ ...core.planFadeTimes(from, choices), startVolume: 0.8, status: FADE.ACTIVE });
+
+test('choices and constants', () => {
+  assert.deepEqual([...core.DELAY_OPTIONS], [10, 15, 20, 30, 45, 60, 90]);
+  assert.deepEqual([...core.FADE_OPTIONS], [10, 15, 20, 30]);
+  assert.deepEqual([...core.WHISPER_OPTIONS], [10, 15, 20, 30]);
+  assert.deepEqual([...core.EXTEND_OPTIONS], [10, 20]);
+  assert.equal(core.DEFAULT_SETTINGS.delayMinutes, 20);
   assert.ok(core.WHISPER_RATIO >= 0.03 && core.WHISPER_RATIO <= 0.05);
   assert.equal(core.SNOOZE_MS, 9 * MINUTE);
   assert.equal(core.WAKE_RAMP_MS, 90 * 1000);
@@ -22,105 +29,164 @@ test('product constants match the PRD', () => {
   assert.equal(core.WAKE_LATE_LIMIT_MS, 10 * MINUTE);
 });
 
-test('parseClockTime accepts HH:MM and rejects junk', () => {
-  assert.deepEqual(core.parseClockTime('07:00'), { hours: 7, minutes: 0 });
-  assert.deepEqual(core.parseClockTime('23:59'), { hours: 23, minutes: 59 });
-  assert.equal(core.parseClockTime('24:00'), null);
-  assert.equal(core.parseClockTime('7am'), null);
-  assert.equal(core.parseClockTime(''), null);
+test('fadeChoices keeps only allowed values', () => {
+  assert.deepEqual(core.fadeChoices({ delayMinutes: 45, fadeMinutes: 30, whisperMinutes: 15 }), {
+    delayMinutes: 45,
+    fadeMinutes: 30,
+    whisperMinutes: 15,
+  });
+  assert.deepEqual(core.fadeChoices({ delayMinutes: 5, fadeMinutes: 11, whisperMinutes: 'x' }), DEFAULTS);
 });
 
-test('nextOccurrence picks the next local clock time', () => {
-  const now = at(2026, 10, 30, 23, 0);
-  assert.equal(core.nextOccurrence('07:00', now), at(2026, 10, 31, 7, 0));
-  assert.equal(core.nextOccurrence('23:30', now), at(2026, 10, 30, 23, 30));
-});
-
-test('nextOccurrence rolls a time equal to now to tomorrow', () => {
-  const now = at(2026, 10, 30, 7, 0);
-  assert.equal(core.nextOccurrence('07:00', now), at(2026, 10, 31, 7, 0));
-});
-
-test('nextOccurrence lands on the wall-clock time across a DST change', () => {
-  // US DST ends 2026-11-01 at 2:00 AM: the night is 25 hours long.
-  const now = at(2026, 10, 31, 23, 0);
-  const wake = core.nextOccurrence('07:00', now);
-  assert.equal(new Date(wake).getHours(), 7);
-  assert.equal(wake - now, 9 * 60 * MINUTE); // 8 wall-clock hours + the repeated hour
-});
-
-test('planFadeTimes: 20 min countdown, 10 min fade, 5 min whisper', () => {
-  const now = at(2026, 10, 30, 23, 0);
-  const t = core.planFadeTimes(now, 20 * MINUTE);
+test('planFadeTimes: countdown, fade, whisper, silence', () => {
+  const t = core.planFadeTimes(NIGHT, { delayMinutes: 20, fadeMinutes: 15, whisperMinutes: 10 });
   assert.equal(t.fadeStartAt, at(2026, 10, 30, 23, 20));
-  assert.equal(t.fadeEndAt, at(2026, 10, 30, 23, 30));
-  assert.equal(t.muteAt, at(2026, 10, 30, 23, 35));
+  assert.equal(t.fadeEndAt, at(2026, 10, 30, 23, 35));
+  assert.equal(t.muteAt, at(2026, 10, 30, 23, 45));
+  assert.equal(t.delayStartedAt, NIGHT);
+  assert.equal(t.fadeFromAt, t.fadeStartAt);
+  assert.equal(t.fadeFromGain, 1);
 });
 
-test('fade phases follow the PRD timeline', () => {
-  const fade = { ...core.planFadeTimes(at(2026, 10, 30, 23, 0), 20 * MINUTE), startVolume: 0.8 };
-  assert.equal(core.fadePhaseAt(fade, at(2026, 10, 30, 23, 19, 59)), STATE.ARMED);
-  assert.equal(core.fadePhaseAt(fade, at(2026, 10, 30, 23, 20)), STATE.FADING);
-  assert.equal(core.fadePhaseAt(fade, at(2026, 10, 30, 23, 30)), STATE.WHISPER);
-  assert.equal(core.fadePhaseAt(fade, at(2026, 10, 30, 23, 35)), STATE.MUTED);
+test('planFadeFromNow starts the fade immediately', () => {
+  const t = core.planFadeFromNow(NIGHT, { delayMinutes: 90, fadeMinutes: 20, whisperMinutes: 15 });
+  assert.equal(t.fadeStartAt, NIGHT);
+  assert.equal(t.fadeEndAt, NIGHT + 20 * MINUTE);
+  assert.equal(t.muteAt, NIGHT + 35 * MINUTE);
+  assert.equal(t.delayMinutes, 90, 'keeps the chosen countdown for a later Restart');
 });
 
-test('fadeTargetAt leaves the volume alone before the fade', () => {
-  const fade = { ...core.planFadeTimes(0, 20 * MINUTE), startVolume: 0.8 };
-  assert.deepEqual(core.fadeTargetAt(fade, 10 * MINUTE), { phase: STATE.ARMED, volume: null, muted: null });
+test('phases follow the timeline', () => {
+  const f = plan();
+  assert.equal(core.fadePhaseAt(f, f.fadeStartAt - 1), STATE.ARMED);
+  assert.equal(core.fadePhaseAt(f, f.fadeStartAt), STATE.FADING);
+  assert.equal(core.fadePhaseAt(f, f.fadeEndAt), STATE.WHISPER);
+  assert.equal(core.fadePhaseAt(f, f.muteAt), STATE.MUTED);
 });
 
-test('fade volume falls smoothly and monotonically to the whisper level', () => {
-  const fade = { ...core.planFadeTimes(0, 20 * MINUTE), startVolume: 0.8 };
+test('the volume is untouched before the fade, then falls smoothly to a whisper and mutes', () => {
+  const f = plan();
+  assert.deepEqual(core.fadeTargetAt(f, f.fadeStartAt - 1), { phase: STATE.ARMED, volume: null, muted: null });
   let previous = Infinity;
-  for (let t = fade.fadeStartAt; t <= fade.fadeEndAt; t += 5000) {
-    const { volume } = core.fadeTargetAt(fade, t);
-    assert.ok(volume <= previous + 1e-12, `volume rose at ${t}`);
+  for (let t = f.fadeStartAt; t <= f.fadeEndAt; t += 5000) {
+    const { volume } = core.fadeTargetAt(f, t);
+    assert.ok(volume <= previous + 1e-12);
     previous = volume;
   }
-  const start = core.fadeTargetAt(fade, fade.fadeStartAt).volume;
-  assert.ok(Math.abs(start - 0.8) < 1e-9);
-  const whisper = core.fadeTargetAt(fade, fade.fadeEndAt);
-  assert.equal(whisper.phase, STATE.WHISPER);
-  assert.ok(Math.abs(whisper.volume - 0.8 * core.WHISPER_RATIO) < 1e-9);
+  near(core.fadeTargetAt(f, f.fadeStartAt).volume, 0.8, 1e-9, 'starts at the starting volume');
+  const whisper = core.fadeTargetAt(f, f.fadeEndAt);
+  near(whisper.volume, 0.8 * core.WHISPER_RATIO, 1e-9, 'whisper level');
   assert.equal(whisper.muted, null);
+  const silent = core.fadeTargetAt(f, f.muteAt);
+  assert.equal(silent.muted, true);
 });
 
-test('fade has no audible jump at either end (eased in dB)', () => {
-  const fade = { ...core.planFadeTimes(0, 0), startVolume: 1 };
-  const db = (v) => 20 * Math.log10(v);
-  const first = db(core.fadeTargetAt(fade, 1000).volume);
-  const last = db(core.fadeTargetAt(fade, fade.fadeEndAt - 1000).volume) - db(core.WHISPER_RATIO);
-  assert.ok(Math.abs(first) < 0.05, `first second drops ${first} dB`);
-  assert.ok(Math.abs(last) < 0.05, `last second is ${last} dB above whisper`);
-  // Midway is half-way in decibels: perceptually even.
-  const mid = db(core.fadeTargetAt(fade, core.FADE_DURATION_MS / 2).volume);
-  assert.ok(Math.abs(mid - db(core.WHISPER_RATIO) / 2) < 0.01);
+test('the fade is even in decibels with gentle ends', () => {
+  const f = { ...plan({ delayMinutes: 10, fadeMinutes: 10, whisperMinutes: 10 }), startVolume: 1 };
+  near(db(core.fadeGainAt(f, f.fadeStartAt + 1000)), 0, 0.05, 'first second');
+  near(db(core.fadeGainAt(f, f.fadeEndAt - 1000)), db(core.WHISPER_RATIO), 0.05, 'last second');
+  near(db(core.fadeGainAt(f, f.fadeStartAt + 5 * MINUTE)), db(core.WHISPER_RATIO) / 2, 0.01, 'midway');
 });
 
-test('fade depends only on timestamps, not on how often it is sampled', () => {
-  const fade = { ...core.planFadeTimes(0, 0), startVolume: 0.5 };
-  const t = 4 * MINUTE + 321;
-  assert.equal(core.fadeTargetAt(fade, t).volume, core.fadeTargetAt({ ...fade }, t).volume);
+test('+10 keeps the current phase going 10 minutes longer', () => {
+  const f = plan();
+  // Countdown: everything moves later.
+  let c = core.extendFade(f, 10, f.fadeStartAt - 5 * MINUTE);
+  assert.equal(c.fadeStartAt, f.fadeStartAt + 10 * MINUTE);
+  assert.equal(c.fadeEndAt, f.fadeEndAt + 10 * MINUTE);
+  assert.equal(c.muteAt, f.muteAt + 10 * MINUTE);
+  // Whisper: only silence moves.
+  c = core.extendFade(f, 20, f.fadeEndAt + MINUTE);
+  assert.deepEqual(c, { muteAt: f.muteAt + 20 * MINUTE });
+  // Silent: nothing to extend.
+  assert.equal(core.extendFade(f, 10, f.muteAt + 1).error, 'silent');
 });
 
-test('muted phase mutes and keeps the whisper volume', () => {
-  const fade = { ...core.planFadeTimes(0, 0), startVolume: 0.5 };
-  const target = core.fadeTargetAt(fade, fade.muteAt + 1);
-  assert.equal(target.phase, STATE.MUTED);
-  assert.equal(target.muted, true);
-  assert.ok(Math.abs(target.volume - 0.5 * core.WHISPER_RATIO) < 1e-9);
+test('+10 during the fade carries on from the current level, with no jump', () => {
+  const f = plan();
+  const now = f.fadeStartAt + 4 * MINUTE;
+  const before = core.fadeTargetAt(f, now).volume;
+  const extended = { ...f, ...core.extendFade(f, 10, now) };
+  assert.equal(extended.fadeEndAt, f.fadeEndAt + 10 * MINUTE);
+  assert.equal(extended.muteAt, f.muteAt + 10 * MINUTE);
+  near(core.fadeTargetAt(extended, now).volume, before, 1e-9, 'same volume at the moment of extending');
+  // It still keeps falling and reaches the whisper at the new end.
+  assert.ok(core.fadeTargetAt(extended, now + MINUTE).volume < before);
+  near(core.fadeTargetAt(extended, extended.fadeEndAt).volume, 0.8 * core.WHISPER_RATIO, 1e-9, 'whisper');
 });
 
-test('validateSchedule refuses a wake before the fade has muted', () => {
-  const now = at(2026, 10, 30, 23, 0);
-  const { muteAt } = core.planFadeTimes(now, 20 * MINUTE); // 11:35 PM
-  const early = core.validateSchedule({ muteAt, wakeAt: at(2026, 10, 30, 23, 30) });
+test('changing chips before the fade re-plans from when the countdown began', () => {
+  const f = plan();
+  const now = NIGHT + 5 * MINUTE;
+  const c = core.retimeFade(f, { delayMinutes: 30 }, now);
+  assert.equal(c.fadeStartAt, NIGHT + 30 * MINUTE);
+  assert.equal(c.fadeEndAt, NIGHT + 40 * MINUTE);
+  assert.equal(c.muteAt, NIGHT + 50 * MINUTE);
+  // A countdown shorter than the time already passed starts the fade now.
+  assert.equal(core.retimeFade(f, { delayMinutes: 10 }, NIGHT + 12 * MINUTE).fadeStartAt, NIGHT + 12 * MINUTE);
+  // Fade length and whisper length chips.
+  const g = core.retimeFade(f, { fadeMinutes: 30 }, now);
+  assert.equal(g.fadeEndAt, f.fadeStartAt + 30 * MINUTE);
+  assert.equal(g.muteAt, f.fadeStartAt + 40 * MINUTE);
+  assert.equal(core.retimeFade(f, { whisperMinutes: 20 }, now).muteAt, f.fadeEndAt + 20 * MINUTE);
+});
+
+test('chips for phases that have started are locked', () => {
+  const f = plan();
+  assert.equal(core.retimeFade(f, { delayMinutes: 30 }, f.fadeStartAt + 1).error, 'locked');
+  assert.equal(core.retimeFade(f, { fadeMinutes: 20 }, f.fadeEndAt + 1).error, 'locked');
+  assert.equal(core.retimeFade(f, { whisperMinutes: 20 }, f.muteAt + 1).error, 'locked');
+  // Choosing the value that's already set is never an error.
+  assert.equal(core.retimeFade(f, { delayMinutes: 20 }, f.muteAt + 1).error, undefined);
+});
+
+test('changing the fade length mid-fade rebases without a jump', () => {
+  const f = plan({ delayMinutes: 20, fadeMinutes: 30, whisperMinutes: 10 });
+  const now = f.fadeStartAt + 12 * MINUTE;
+  const before = core.fadeTargetAt(f, now).volume;
+  const shorter = { ...f, ...core.retimeFade(f, { fadeMinutes: 15 }, now) };
+  assert.equal(shorter.fadeEndAt, f.fadeStartAt + 15 * MINUTE);
+  near(core.fadeTargetAt(shorter, now).volume, before, 1e-9, 'no jump');
+  // Shorter than the time already faded: finish over the next minute instead.
+  const tooShort = { ...f, ...core.retimeFade(f, { fadeMinutes: 10 }, now) };
+  assert.equal(tooShort.fadeEndAt, now + core.MIN_FADE_REMAINING_MS);
+  assert.equal(tooShort.muteAt, now + core.MIN_FADE_REMAINING_MS + 10 * MINUTE);
+});
+
+test('a shorter whisper chosen mid-whisper mutes now rather than in the past', () => {
+  const f = plan({ delayMinutes: 20, fadeMinutes: 10, whisperMinutes: 30 });
+  const now = f.fadeEndAt + 20 * MINUTE;
+  assert.equal(core.retimeFade(f, { whisperMinutes: 10 }, now).muteAt, now);
+});
+
+test('nextOccurrence picks the next local clock time, across DST', () => {
+  assert.equal(core.nextOccurrence('07:00', NIGHT), at(2026, 10, 31, 7, 0));
+  assert.equal(core.nextOccurrence('23:30', NIGHT), at(2026, 10, 30, 23, 30));
+  assert.equal(core.nextOccurrence('23:00', NIGHT), at(2026, 10, 31, 23, 0), 'equal to now rolls over');
+  const beforeDst = at(2026, 10, 31, 23, 0); // US DST ends 2026-11-01 02:00
+  const wake = core.nextOccurrence('07:00', beforeDst);
+  assert.equal(new Date(wake).getHours(), 7);
+  assert.equal(wake - beforeDst, 9 * 60 * MINUTE);
+});
+
+test('datetime-local values round-trip in local time', () => {
+  const t = at(2026, 10, 31, 7, 30);
+  assert.equal(core.toDateTimeLocal(t), '2026-10-31T07:30');
+  assert.equal(core.parseDateTimeLocal('2026-10-31T07:30'), t);
+  assert.equal(core.parseDateTimeLocal('nope'), null);
+  assert.equal(core.clockTimeOf(t), '07:30');
+});
+
+test('validateWakeAt: within 24 hours and after the video goes silent', () => {
+  const muteAt = NIGHT + 40 * MINUTE;
+  assert.equal(core.validateWakeAt(at(2026, 10, 31, 7, 0), NIGHT, muteAt), null);
+  assert.equal(core.validateWakeAt(NIGHT - MINUTE, NIGHT, null).code, 'past');
+  assert.equal(core.validateWakeAt(NIGHT + 25 * 60 * MINUTE, NIGHT, null).code, 'too-far');
+  assert.equal(core.validateWakeAt(NIGHT + 24 * 60 * MINUTE, NIGHT, null), null, 'exactly 24 hours is fine');
+  const early = core.validateWakeAt(NIGHT + 30 * MINUTE, NIGHT, muteAt);
   assert.equal(early.code, 'wake-before-fade-ends');
-  assert.match(early.message, /later wake time or a shorter fade countdown/);
-  assert.equal(core.validateSchedule({ muteAt, wakeAt: muteAt }).code, 'wake-before-fade-ends');
-  assert.equal(core.validateSchedule({ muteAt, wakeAt: at(2026, 10, 31, 7, 0) }), null);
-  assert.equal(core.validateSchedule({ muteAt: null, wakeAt: at(2026, 10, 31, 7, 0) }), null);
+  assert.match(early.message, /later wake time or a shorter fade/);
+  assert.equal(core.validateWakeAt(NIGHT + 30 * MINUTE, NIGHT, null), null, 'no fade, no conflict');
 });
 
 test('wake ramp rises from quiet to the chosen level over 90 seconds', () => {
@@ -132,102 +198,57 @@ test('wake ramp rises from quiet to the chosen level over 90 seconds', () => {
     assert.ok(v >= previous);
     previous = v;
   }
-  assert.ok(Math.abs(core.wakeRampVolume(core.WAKE_RAMP_MS, 0.8) - 0.8) < 1e-9);
-  assert.ok(Math.abs(core.wakeRampVolume(10 * MINUTE, 0.8) - 0.8) < 1e-9);
+  near(core.wakeRampVolume(core.WAKE_RAMP_MS, 0.8), 0.8, 1e-9, 'full');
+  near(core.wakeRampVolume(10 * MINUTE, 0.8), 0.8, 1e-9, 'holds');
 });
 
-test('wakeDueAction rings on time, waits when early, and never rings 10+ minutes late', () => {
+test('wakeDueAction rings on time and never rings 10+ minutes late', () => {
   const wake = { status: WAKE.SCHEDULED, nextRingAt: at(2026, 10, 31, 7, 0) };
-  assert.equal(core.wakeDueAction(wake, at(2026, 10, 31, 6, 59)), 'wait');
-  assert.equal(core.wakeDueAction(wake, wake.nextRingAt - 2000), 'ring'); // alarm a hair early
-  assert.equal(core.wakeDueAction(wake, wake.nextRingAt), 'ring');
+  assert.equal(core.wakeDueAction(wake, wake.nextRingAt - MINUTE), 'wait');
+  assert.equal(core.wakeDueAction(wake, wake.nextRingAt - 2000), 'ring');
   assert.equal(core.wakeDueAction(wake, wake.nextRingAt + 9 * MINUTE + 59000), 'ring');
   assert.equal(core.wakeDueAction(wake, wake.nextRingAt + 10 * MINUTE), 'missed');
-  assert.equal(core.wakeDueAction(wake, at(2026, 10, 31, 11, 0)), 'missed');
   assert.equal(core.wakeDueAction({ ...wake, status: WAKE.SNOOZED }, wake.nextRingAt), 'ring');
   assert.equal(core.wakeDueAction({ ...wake, status: WAKE.RINGING }, wake.nextRingAt), 'none');
-  assert.equal(core.wakeDueAction({ ...wake, status: WAKE.DISMISSED }, wake.nextRingAt), 'none');
   assert.equal(core.wakeDueAction(null, 0), 'none');
 });
 
-function sampleSession(overrides = {}) {
-  const now = at(2026, 10, 30, 23, 0);
-  return {
-    id: 's1',
-    armedAt: now,
-    fade: { ...core.planFadeTimes(now, 20 * MINUTE), startVolume: 0.7, status: FADE.ACTIVE, tabId: 1 },
-    wake: { status: WAKE.SCHEDULED, wakeAt: at(2026, 10, 31, 7, 0), nextRingAt: at(2026, 10, 31, 7, 0) },
-    notices: [],
-    ...overrides,
-  };
-}
+test('describeSession: the two switches are independent', () => {
+  const fade = plan();
+  const wake = { status: WAKE.SCHEDULED, wakeAt: at(2026, 10, 31, 7, 0), nextRingAt: at(2026, 10, 31, 7, 0) };
+  assert.equal(core.describeSession(null, NIGHT).state, STATE.IDLE);
 
-test('describeSession walks the state machine', () => {
-  const s = sampleSession();
-  assert.equal(core.describeSession(null, 0).state, STATE.IDLE);
-  assert.equal(core.describeSession(s, at(2026, 10, 30, 23, 5)).state, STATE.ARMED);
-  assert.equal(core.describeSession(s, at(2026, 10, 30, 23, 25)).state, STATE.FADING);
-  assert.equal(core.describeSession(s, at(2026, 10, 30, 23, 32)).state, STATE.WHISPER);
-  const muted = core.describeSession(s, at(2026, 10, 31, 2, 0));
+  const both = { fade, wake };
+  assert.equal(core.describeSession(both, NIGHT).state, STATE.ARMED);
+  assert.equal(core.describeSession(both, fade.fadeStartAt + 1).state, STATE.FADING);
+  assert.equal(core.describeSession(both, fade.fadeEndAt + 1).state, STATE.WHISPER);
+  const muted = core.describeSession(both, fade.muteAt + 1);
   assert.equal(muted.state, STATE.MUTED);
-  assert.equal(muted.finished, false, 'wake still pending');
+  assert.equal(muted.pending, true, 'the alarm is still ahead');
 
-  const ringing = { ...s, wake: { ...s.wake, status: WAKE.RINGING } };
-  assert.equal(core.describeSession(ringing, at(2026, 10, 31, 7, 0)).state, STATE.WAKING);
-  const snoozed = { ...s, wake: { ...s.wake, status: WAKE.SNOOZED } };
-  assert.equal(core.describeSession(snoozed, at(2026, 10, 31, 7, 1)).state, STATE.SNOOZED);
-  const dismissed = { ...s, wake: { ...s.wake, status: WAKE.DISMISSED } };
-  const d = core.describeSession(dismissed, at(2026, 10, 31, 7, 2));
-  assert.equal(d.state, STATE.DISMISSED);
-  assert.equal(d.finished, true);
-  const missed = { ...s, wake: { ...s.wake, status: WAKE.MISSED } };
-  assert.equal(core.describeSession(missed, at(2026, 10, 31, 9, 0)).state, STATE.MISSED_WAKE);
+  const alarmOnly = core.describeSession({ fade: null, wake }, NIGHT);
+  assert.deepEqual([alarmOnly.state, alarmOnly.fadeOn, alarmOnly.wakeOn], [STATE.ARMED, false, true]);
+
+  const fadeOnly = core.describeSession({ fade, wake: null }, fade.muteAt + 1);
+  assert.deepEqual([fadeOnly.fadeOn, fadeOnly.pending], [true, false], 'silent: still on, nothing pending');
+
+  assert.equal(core.describeSession({ fade, wake: { ...wake, status: WAKE.RINGING } }, NIGHT).state, STATE.WAKING);
+  assert.equal(core.describeSession({ fade, wake: { ...wake, status: WAKE.SNOOZED } }, NIGHT).state, STATE.SNOOZED);
+  const paused = core.describeSession({ fade: { ...fade, status: FADE.OVERRIDDEN }, wake: null }, NIGHT);
+  assert.equal(paused.fadeOverridden, true);
 });
 
-test('a fade-only night finishes once muted', () => {
-  const s = sampleSession({ wake: null });
-  assert.equal(core.isSessionFinished(s, at(2026, 10, 30, 23, 34)), false);
-  assert.equal(core.isSessionFinished(s, at(2026, 10, 30, 23, 35)), true);
-  assert.equal(core.describeSession(s, at(2026, 10, 30, 23, 40)).state, STATE.MUTED);
-});
-
-test('a user override keeps the night open and needs attention', () => {
-  const s = sampleSession({ wake: null });
-  s.fade.status = FADE.OVERRIDDEN;
-  const d = core.describeSession(s, at(2026, 10, 30, 23, 25));
-  assert.equal(d.needsAttention, true);
-  assert.equal(d.finished, false);
-});
-
-test('a lost tab cancels only the fade; the wake stays armed', () => {
-  const s = sampleSession();
-  s.fade.status = FADE.LOST;
-  const d = core.describeSession(s, at(2026, 10, 30, 23, 25));
-  assert.equal(d.state, STATE.ARMED);
-  assert.equal(d.wakePending, true);
-  const fadeOnly = sampleSession({ wake: null });
-  fadeOnly.fade.status = FADE.LOST;
-  assert.equal(core.describeSession(fadeOnly, at(2026, 10, 30, 23, 25)).state, STATE.ERROR);
-});
-
-test('formatDuration', () => {
+test('formatting', () => {
   assert.equal(core.formatDuration(19 * MINUTE + 42000), '19m 42s');
   assert.equal(core.formatDuration(42000), '42s');
   assert.equal(core.formatDuration(65 * MINUTE), '1h 05m');
   assert.equal(core.formatDuration(-5), '0s');
-  assert.equal(core.formatDuration(1), '1s'); // rounds up so it never shows 0 early
-});
-
-test('formatWakeWhen always includes the date and AM/PM', () => {
-  const now = at(2026, 10, 30, 23, 0);
-  const text = core.formatWakeWhen(at(2026, 10, 31, 7, 0), now);
-  assert.match(text, /7:00\sAM tomorrow \(Sat, Oct 31\)/);
-  assert.match(core.formatWakeWhen(at(2026, 10, 30, 23, 50), now), /11:50\sPM today/);
+  assert.match(core.formatClockShort(at(2026, 10, 30, 23, 12)), /^11:12\spm$/);
+  assert.match(core.formatWakeShort(at(2026, 10, 31, 7, 30)), /^7:30\sam, Sat Oct 31$/);
 });
 
 test('isYouTubeUrl only matches www.youtube.com', () => {
   assert.equal(core.isYouTubeUrl('https://www.youtube.com/watch?v=abc'), true);
-  assert.equal(core.isYouTubeUrl('https://www.youtube.com'), true);
   assert.equal(core.isYouTubeUrl('https://www.youtube.com.evil.example/'), false);
   assert.equal(core.isYouTubeUrl('https://music.youtube.com/'), false);
   assert.equal(core.isYouTubeUrl(undefined), false);
