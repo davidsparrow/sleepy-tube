@@ -17,6 +17,9 @@ const KEY_SESSION = 'session';
 const KEY_SETTINGS = 'settings';
 const KEY_NOTICES = 'notices';
 const MAX_NOTICES = 4;
+// Times-only record of recent alarm events, read back during overnight QA.
+const KEY_ALARM_LOG = 'alarmLog';
+const MAX_ALARM_LOG = 20;
 
 const ALARM_PREFIX = 'st:';
 const ALARM_FADE = { start: 'st:fade-start', whisper: 'st:fade-whisper', mute: 'st:fade-mute' };
@@ -112,6 +115,13 @@ async function addNotice(text) {
   const notices = (await loadNotices()).filter((n) => n.text !== text);
   notices.push({ id: newId(), text, at: Date.now() });
   await chrome.storage.local.set({ [KEY_NOTICES]: notices.slice(-MAX_NOTICES) });
+}
+
+/** Appends to the alarm log: what happened, when it was due, and when it happened. */
+async function logAlarm(event, wake, extra = {}) {
+  const { [KEY_ALARM_LOG]: log = [] } = await chrome.storage.local.get(KEY_ALARM_LOG);
+  log.push({ event, dueAt: wake.nextRingAt, at: Date.now(), snoozes: wake.snoozeCount || 0, ...extra });
+  await chrome.storage.local.set({ [KEY_ALARM_LOG]: log.slice(-MAX_ALARM_LOG) });
 }
 
 async function getTab(tabId) {
@@ -419,12 +429,14 @@ async function startRinging(session, now) {
   await saveSession(session);
   await syncAlarms(session);
   const playing = await ensureWakeAudio(session);
+  await logAlarm('rang', wake, { audioError: wake.audioError });
   await showWakeNotification(session, { audible: !playing });
   await openWakeWindow(session);
 }
 
-/** Ends the alarm part of the night (dismissed, expired or missed). */
-async function endWake(session) {
+/** Ends the alarm part of the night: dismissed, expired, missed or switched off. */
+async function endWake(session, outcome) {
+  if (outcome) await logAlarm(outcome, session.wake);
   settlePausedFade(session);
   session.wake = null;
   const remaining = await commit(session);
@@ -440,13 +452,13 @@ async function markMissed(session) {
       'It never rings late, so keep a separate alarm as backup.',
   );
   await showInfoNotification('Wake alarm missed', `Your ${at} alarm could not ring on time, so it was skipped.`);
-  return endWake(session);
+  return endWake(session, 'missed');
 }
 
 async function expireRinging(session) {
   await addNotice('Your wake alarm rang for 15 minutes and turned itself off.');
   await showInfoNotification('Wake alarm stopped', 'The alarm rang for 15 minutes and has been turned off.');
-  return endWake(session);
+  return endWake(session, 'stopped after 15 min');
 }
 
 /** The fade's tab closed or left YouTube: switch only the fade off (PRD R7). */
@@ -680,7 +692,8 @@ async function alarmOn({ at }) {
 async function alarmOff() {
   const session = await loadSession();
   if (!session || !core.wakeIsOn(session.wake)) return { ok: true, session };
-  return { ok: true, session: await endWake(session) };
+  const rang = session.wake.status !== WAKE.SCHEDULED;
+  return { ok: true, session: await endWake(session, rang ? 'dismissed' : null) };
 }
 
 async function setWakeTime(session, at) {
@@ -726,6 +739,7 @@ async function snooze() {
   await syncAlarms(session);
   await stopWakeAudio();
   await clearWakeNotification();
+  await logAlarm('snoozed', wake);
   return { ok: true, session };
 }
 
@@ -734,7 +748,7 @@ async function dismiss() {
   const session = await loadSession();
   const wake = session && session.wake;
   if (!wake || !(wake.status === WAKE.RINGING || wake.status === WAKE.SNOOZED)) return { ok: true, session };
-  return { ok: true, session: await endWake(session) };
+  return { ok: true, session: await endWake(session, 'dismissed') };
 }
 
 // --- Test sound, notices ------------------------------------------------------------
@@ -929,12 +943,43 @@ chrome.runtime.onStartup.addListener(() => serialized(reconcile));
 // Every time the worker starts: recover from whatever happened while it slept.
 serialized(reconcile);
 
-// --- QA helper (service worker console) ----------------------------------------
+// --- QA helpers (service worker console; see docs/QA.md) -------------------------
 // sleepyDebug.fastForward(20) moves the night 20 minutes forward in time, e.g.
-// to reach the fade or the wake alarm without waiting.
+// to reach the fade without waiting; skipToAlarm() jumps to the alarm.
+
+function fastForwardSession(session, ms) {
+  session.armedAt -= ms;
+  const fade = session.fade;
+  if (fade) {
+    for (const k of ['delayStartedAt', 'fadeStartAt', 'fadeFromAt', 'fadeEndAt', 'muteAt']) {
+      if (fade[k] != null) fade[k] -= ms;
+    }
+  }
+  const wake = session.wake;
+  if (wake) {
+    for (const k of ['wakeAt', 'nextRingAt', 'ringStartedAt', 'firstRangAt']) {
+      if (wake[k] != null) wake[k] -= ms;
+    }
+  }
+}
+
 self.sleepyDebug = {
   session: loadSession,
   notices: loadNotices,
+  // Prints recent alarm events as a table: when each was due and when it happened.
+  alarmLog: async () => {
+    const { [KEY_ALARM_LOG]: log = [] } = await chrome.storage.local.get(KEY_ALARM_LOG);
+    const rows = log.map((e) => ({
+      event: e.event,
+      due: new Date(e.dueAt).toLocaleString(),
+      happened: new Date(e.at).toLocaleString(),
+      'seconds late': e.event === 'rang' || e.event === 'missed' ? Math.round((e.at - e.dueAt) / 1000) : '',
+      snoozes: e.snoozes,
+      'sound problem': e.audioError || '',
+    }));
+    console.table(rows);
+    return rows.length ? `${rows.length} alarm events (newest last)` : 'No alarm events yet';
+  },
   reconcile: () => serialized(reconcile),
   // Forget tonight's session (and notices) without touching the video.
   reset: () =>
@@ -953,21 +998,18 @@ self.sleepyDebug = {
     serialized(async () => {
       const session = await loadSession();
       if (!session) return null;
-      const ms = minutes * MINUTE;
-      session.armedAt -= ms;
-      const fade = session.fade;
-      if (fade) {
-        for (const k of ['delayStartedAt', 'fadeStartAt', 'fadeFromAt', 'fadeEndAt', 'muteAt']) {
-          if (fade[k] != null) fade[k] -= ms;
-        }
-      }
-      const wake = session.wake;
-      if (wake) {
-        for (const k of ['wakeAt', 'nextRingAt', 'ringStartedAt', 'firstRangAt']) {
-          if (wake[k] != null) wake[k] -= ms;
-        }
-      }
+      fastForwardSession(session, minutes * MINUTE);
       await chrome.storage.local.set({ [KEY_SESSION]: session });
       return reconcile();
+    }),
+  // Jumps straight to the alarm time, so it rings now.
+  skipToAlarm: () =>
+    serialized(async () => {
+      const session = await loadSession();
+      if (!session || !core.isWakePending(session.wake)) return 'The alarm is not set.';
+      fastForwardSession(session, Math.max(0, session.wake.nextRingAt - Date.now()));
+      await chrome.storage.local.set({ [KEY_SESSION]: session });
+      await reconcile();
+      return 'Ringing now.';
     }),
 };

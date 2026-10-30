@@ -175,7 +175,7 @@ const offscreenStatus = (context) =>
 async function resetNight(context) {
   await swEval(context, async () => {
     await self.sleepyDebug.reset();
-    await chrome.storage.local.remove('settings');
+    await chrome.storage.local.remove(['settings', 'alarmLog']);
     await chrome.notifications.clear('st-info');
   });
 }
