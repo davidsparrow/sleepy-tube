@@ -30,13 +30,11 @@ Contents:
 
 ### Step 1: Download SleepyTube
 
-1. In Chrome, open the version you've been asked to test:
-   - **The version under review** (until it's merged):
-     <https://github.com/davidsparrow/sleepy-tube/tree/claude/determined-fermat-apt736>
-   - **The released version** (after it's merged): <https://github.com/davidsparrow/sleepy-tube>
-2. Click the green **Code** button (top right of the file list).
-3. Click **Download ZIP**.
-4. A ZIP file downloads to your **Downloads** folder. Its name starts with `sleepy-tube` (for example `sleepy-tube-claude-determined-fermat-apt736.zip`).
+1. In Chrome, open <https://github.com/davidsparrow/sleepy-tube>.
+2. **Only if you were asked to test a particular branch:** click the button above the file list that says **main**, then click the branch name you were given. Otherwise, leave it on **main**.
+3. Click the green **Code** button (top right of the file list).
+4. Click **Download ZIP**.
+5. A ZIP file downloads to your **Downloads** folder. Its name starts with `sleepy-tube` (for example `sleepy-tube-main.zip`).
 
 ### Step 2: Unzip it into your Documents folder
 
@@ -443,7 +441,7 @@ Testers can skip this part. It needs Terminal, Node.js 18+ and Git.
 ```sh
 git clone https://github.com/davidsparrow/sleepy-tube.git
 cd sleepy-tube                       # every command below runs from this folder
-git checkout claude/determined-fermat-apt736   # the version under review (until merged)
+# To test a branch under review: git checkout <branch-name>
 
 npm test                             # unit tests for the timing logic
 npm install                          # once: installs Playwright

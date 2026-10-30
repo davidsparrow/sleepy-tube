@@ -440,7 +440,8 @@ test('alarm: rings from bundled audio, snoozes 9 minutes, and dismisses', async 
   // The alarm log records each event with when it was due and when it happened.
   const log = await h.swEval(env.context, async () => (await chrome.storage.local.get('alarmLog')).alarmLog);
   assert.deepEqual(log.map((e) => e.event), ['rang', 'snoozed', 'rang', 'dismissed']);
-  assert.ok(log[0].at - log[0].dueAt < 10000, 'rang on time');
+  // ringNow() fast-forwards in whole minutes, so it can overshoot by up to a minute.
+  assert.ok(log[0].at - log[0].dueAt < 70 * 1000, 'rang within the fast-forward step');
   assert.equal(await h.swEval(env.context, () => self.sleepyDebug.alarmLog()), '4 alarm events (newest last)');
 
   await wakePage.waitForSelector('#restore:not([hidden])');
@@ -454,6 +455,9 @@ test('an alarm-only night rings without any YouTube tab', async () => {
   await alarmOn(popup, 60);
   assert.equal(await h.swEval(env.context, () => self.sleepyDebug.skipToAlarm()), 'Ringing now.');
   await h.waitFor(async () => (await h.session(env.context)).wake.status === 'ringing', { message: 'ringing' });
+  const [rang] = await h.swEval(env.context, async () => (await chrome.storage.local.get('alarmLog')).alarmLog);
+  assert.equal(rang.event, 'rang');
+  assert.ok(rang.at - rang.dueAt < 10 * 1000, `skipToAlarm rings on time (${rang.at - rang.dueAt} ms late)`);
   const audio = await h.waitFor(() => h.offscreenStatus(env.context), { message: 'offscreen audio' });
   assert.equal(audio.playing, true);
   await popup.click('#alarm-switch'); // switching off while ringing = I'm awake
