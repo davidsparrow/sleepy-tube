@@ -1,0 +1,445 @@
+/* Chrome caps popups at 800 × 600; this layout stays inside both. */
+body {
+  width: 780px;
+  min-height: 560px;
+  padding: 10px 22px 18px;
+}
+
+/* Header: the full logo when everything is off, a compact one otherwise. */
+.hero {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.logo {
+  display: block;
+  height: 200px;
+  width: auto;
+  transition: height 0.2s ease;
+}
+
+body.is-on .logo {
+  height: 124px;
+}
+
+/* Notices take room: keep everything inside Chrome's 600px popup limit. */
+body.is-on.has-notices .logo {
+  height: 80px;
+}
+
+.info-link {
+  position: absolute;
+  top: 2px;
+  right: 0;
+}
+
+/* Notices span both columns. */
+.notices {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notices:empty {
+  display: none;
+}
+
+.notices li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  font-size: 13px;
+}
+
+.notices li span {
+  flex: 1;
+}
+
+.notices li button {
+  min-width: 24px;
+  min-height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* Two columns */
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+  margin-top: 12px;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.col-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1.5px solid var(--line);
+}
+
+.col-title {
+  flex: 1;
+  font-size: 23px;
+  font-weight: 400;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.col-icon {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  color: #5a5a66;
+}
+
+#fader.on .col-title {
+  color: var(--green);
+}
+#fader.on .col-icon {
+  color: var(--green);
+}
+#alarm.on .col-title {
+  color: var(--yellow);
+}
+#alarm.on .col-icon {
+  color: var(--yellow);
+}
+
+.col-hint {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.col-hint:empty {
+  display: none;
+}
+
+.col-hint.warn {
+  color: var(--yellow);
+  font-weight: 600;
+}
+
+/* Fader rows */
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.row-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.row-meta {
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-off);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+#fader.on .row-meta {
+  color: var(--green);
+  font-weight: 600;
+}
+
+.row-foot {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-off);
+  text-align: right;
+}
+
+.row-title {
+  white-space: nowrap;
+}
+
+.left {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(184, 220, 76, 0.2);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  vertical-align: 2px;
+}
+
+.row.done {
+  opacity: 0.6;
+}
+
+/* Chips: a radiogroup of pills */
+.chips {
+  display: flex;
+  gap: 5px;
+}
+
+.chips button {
+  flex: 0 0 44px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.chips button:hover {
+  background: var(--chip-hover);
+}
+
+.chips button[aria-checked='true'] {
+  background: var(--green);
+}
+
+.chips[aria-disabled='true'] button {
+  cursor: not-allowed;
+}
+
+.chips[aria-disabled='true'] button:not([aria-checked='true']) {
+  opacity: 0.55;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+#alarm-actions .btn {
+  flex: 1;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  font-size: 13px;
+}
+
+.banner p {
+  flex: 1;
+}
+
+/* Alarm */
+#alarm-set {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wake-time {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: #6b6b78;
+  cursor: pointer;
+}
+
+.icon-btn svg {
+  width: 36px;
+  height: 36px;
+}
+
+.icon-btn:disabled {
+  cursor: not-allowed;
+}
+
+.icon-btn.play {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--text);
+}
+
+.icon-btn.play svg {
+  width: 20px;
+  height: 20px;
+}
+
+.icon-btn.play:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.wake-display {
+  flex: 1;
+  font-size: 22px;
+  font-weight: 700;
+  color: #77778a;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+#alarm.on #pick-time,
+#alarm.on .wake-display {
+  color: var(--yellow);
+}
+
+.wake-meta {
+  white-space: normal;
+  text-align: left;
+}
+
+#alarm.on .wake-meta {
+  color: var(--text-2);
+}
+
+/* Visually hidden, but still able to show the native date-time picker. */
+.picker-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ringing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: center;
+}
+
+.ring-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--yellow);
+}
+
+.ring-time {
+  font-size: 34px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+#ring-sub {
+  text-align: center;
+  color: var(--text-2);
+}
+
+.btn-big {
+  min-height: 48px;
+  font-size: 18px;
+}
+
+/* Limitations dialog */
+dialog {
+  width: 560px;
+  max-height: 540px;
+  padding: 20px 22px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 18px;
+  background: var(--panel);
+  color: var(--text);
+  overflow: auto;
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+dialog h2 {
+  font-size: 19px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.disclosure {
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  font-weight: 600;
+}
+
+.limits-list {
+  margin: 10px 0 12px;
+  padding-left: 20px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.limits-list li + li {
+  margin-top: 3px;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.option-title {
+  font-weight: 600;
+}
+
+.option input[type='range'] {
+  flex: 1;
+  accent-color: var(--green);
+}
+
+.fine {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}

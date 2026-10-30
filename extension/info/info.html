@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>How SleepyTube works</title>
+    <link rel="icon" href="../icons/icon-32.png" />
+    <link rel="stylesheet" href="../ui/theme.css" />
+    <link rel="stylesheet" href="info.css" />
+  </head>
+  <body class="sky">
+    <main class="info">
+      <header>
+        <img class="logo" src="../images/logo.svg" alt="SleepyTube: Sweet Dreams" />
+        <h1>How SleepyTube works</h1>
+        <p class="lead">Drift off gently. Wake up softly.</p>
+      </header>
+
+      <section aria-labelledby="fade-h">
+        <h2 id="fade-h"><span class="dot green" aria-hidden="true"></span>Fade to Sleep</h2>
+        <p>Play a video on YouTube, open SleepyTube and switch on <strong>Fade to Sleep</strong>. Then:</p>
+        <ol class="steps">
+          <li><strong>Countdown</strong>: nothing changes for the time you pick (10 to 90 minutes).</li>
+          <li><strong>Fade</strong>: the sound fades smoothly over 10 to 30 minutes.</li>
+          <li><strong>Whisper</strong>: it stays very quiet (4% of where it started) for 10 to 30 minutes.</li>
+          <li><strong>Silence</strong>: the video is muted. It keeps playing, and SleepyTube never pauses it.</li>
+        </ol>
+        <dl>
+          <dt>+10 / +20</dt>
+          <dd>Keeps the current step going longer. During the fade, it carries on from the current level, so it never gets louder.</dd>
+          <dt>Restart</dt>
+          <dd>Brings the starting volume back and starts the countdown again from now.</dd>
+          <dt>Cancel, or switching it off</dt>
+          <dd>Stops the fade and brings the video's sound back.</dd>
+          <dt>Changing the chips</dt>
+          <dd>Re-plans tonight straight away. Steps that have already started stay as they are.</dd>
+          <dt>If you change the volume yourself</dt>
+          <dd>SleepyTube stops fading rather than fight you, and offers <em>Resume fade</em>. If you change it before the fade begins, that becomes the starting volume.</dd>
+        </dl>
+        <p>Only the YouTube tab you started it on is affected. Closing that tab stops the fade (you'll see a notice). Other tabs, YouTube's own settings and your computer's volume are never changed.</p>
+      </section>
+
+      <section aria-labelledby="alarm-h">
+        <h2 id="alarm-h"><span class="dot yellow" aria-hidden="true"></span>Alarm</h2>
+        <p>Switch on <strong>Alarm</strong> to play SleepyTube's own gentle chime at your wakeup time. It doesn't need the video, the internet or the YouTube tab.</p>
+        <dl>
+          <dt>Choosing the time</dt>
+          <dd>Use the calendar button for any time in the next 24 hours, or <strong>+10</strong> / <strong>−10</strong> to nudge it. If Fade to Sleep is on, the alarm has to be after the video goes silent.</dd>
+          <dt>Test ▶</dt>
+          <dd>Plays the chime for a few seconds, so you can check the volume and where it plays (speakers or headphones).</dd>
+          <dt>When it rings</dt>
+          <dd>The chime starts very quietly and rises over about 90 seconds. A window opens with <strong>Snooze 9 min</strong> and <strong>I'm awake</strong>; a notification has the same buttons.</dd>
+          <dt>If nobody answers</dt>
+          <dd>It stops by itself after 15 minutes.</dd>
+          <dt>Waking up doesn't turn the video back up</dt>
+          <dd>Switch off Fade to Sleep, or press <em>Restore video sound</em> in the wake window, when you're ready.</dd>
+        </dl>
+      </section>
+
+      <section aria-labelledby="limits-h" class="limits">
+        <h2 id="limits-h">Limitations</h2>
+        <p class="disclosure">
+          SleepyTube cannot wake your computer from sleep. Keep Chrome open and the computer awake, or use a separate
+          alarm as backup.
+        </p>
+        <ul>
+          <li>The alarm only rings while Chrome is running and the computer is awake.</li>
+          <li>
+            <strong>Keep computer awake</strong> (in <em>limitations</em> in the popup) stops sleep from inactivity until you dismiss the
+            alarm. The screen can still turn off. It uses more battery and can't override closing a laptop's lid.
+          </li>
+          <li>If the computer was asleep at alarm time and wakes 10 or more minutes late, the alarm is skipped and you're told, rather than it going off hours late.</li>
+          <li>The alarm can't be heard if the computer is muted or the sound goes to unplugged headphones.</li>
+          <li>YouTube may pause on its own (for example, "Video paused. Continue watching?"). SleepyTube can't prevent that.</li>
+        </ul>
+      </section>
+
+      <section aria-labelledby="privacy-h">
+        <h2 id="privacy-h">Privacy</h2>
+        <p>
+          Everything stays on this computer. SleepyTube has no account, server, analytics, tracking or ads, and makes no
+          network requests. It never reads or stores video titles, addresses, history or audio. It only works on
+          www.youtube.com, and only on the tab you choose.
+        </p>
+      </section>
+
+      <section aria-labelledby="keys-h">
+        <h2 id="keys-h">Keyboard</h2>
+        <p>
+          Tab moves between controls; Space or Enter flips a switch or presses a button. In a row of chips, the arrow
+          keys choose the next or previous value. In the wake window, Snooze has focus first, so a sleepy key press
+          snoozes rather than dismisses.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

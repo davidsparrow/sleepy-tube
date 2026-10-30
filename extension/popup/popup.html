@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>SleepyTube</title>
+    <link rel="stylesheet" href="../ui/theme.css" />
+    <link rel="stylesheet" href="popup.css" />
+    <script src="../lib/core.js"></script>
+    <script src="popup.js" defer></script>
+  </head>
+  <body class="sky">
+    <header class="hero">
+      <img class="logo" src="../images/logo.svg" alt="SleepyTube: Sweet Dreams" />
+      <button type="button" class="link info-link" id="info-link">How it works</button>
+    </header>
+
+    <p id="live" class="sr-only" aria-live="polite"></p>
+    <ul id="notices" class="notices" aria-label="Notices"></ul>
+
+    <main class="columns">
+      <!-- Fade to Sleep -->
+      <section class="col" id="fader" aria-labelledby="fade-title">
+        <div class="col-head">
+          <button type="button" class="switch" id="fade-switch" role="switch" aria-checked="false" aria-labelledby="fade-title">
+            <span class="knob"></span>
+          </button>
+          <h2 class="col-title" id="fade-title">Fade to Sleep</h2>
+          <svg class="col-icon moon" viewBox="0 0 48 48" aria-hidden="true">
+            <defs>
+              <mask id="crescent">
+                <rect width="48" height="48" fill="#fff" />
+                <circle cx="31" cy="17" r="15" fill="#000" />
+              </mask>
+            </defs>
+            <circle cx="22" cy="26" r="18" fill="currentColor" mask="url(#crescent)" />
+            <path fill="currentColor" d="M33 6l1.3 3 3.2.3-2.4 2.1.7 3.2-2.8-1.7-2.8 1.7.7-3.2-2.4-2.1 3.2-.3z" />
+            <path fill="currentColor" d="M40 20l.9 2 2.1.2-1.6 1.4.5 2.1-1.9-1.1-1.9 1.1.5-2.1-1.6-1.4 2.1-.2z" />
+            <path fill="currentColor" d="M27 21l.7 1.6 1.7.2-1.3 1.1.4 1.7-1.5-.9-1.5.9.4-1.7-1.3-1.1 1.7-.2z" />
+          </svg>
+        </div>
+
+        <p class="col-hint" id="fade-hint" role="status"></p>
+
+        <div class="row" id="row-delay" data-step="ARMED">
+          <div class="row-head">
+            <h3 class="row-title" id="delay-title">Countdown<span class="left" hidden><span class="left-time"></span><span class="sr-only"> left</span></span></h3>
+            <p class="row-meta" id="delay-meta"></p>
+          </div>
+          <div class="chips" role="radiogroup" aria-labelledby="delay-title" data-key="delayMinutes"></div>
+          <p class="row-foot" id="silence-preview"></p>
+        </div>
+
+        <div class="row" id="row-fade" data-step="FADING">
+          <div class="row-head">
+            <h3 class="row-title" id="fade-len-title">Fade duration<span class="left" hidden><span class="left-time"></span><span class="sr-only"> left</span></span></h3>
+            <p class="row-meta" id="fade-meta"></p>
+          </div>
+          <div class="chips" role="radiogroup" aria-labelledby="fade-len-title" data-key="fadeMinutes"></div>
+        </div>
+
+        <div class="row" id="row-whisper" data-step="WHISPER">
+          <div class="row-head">
+            <h3 class="row-title" id="whisper-title">Whisper duration<span class="left" hidden><span class="left-time"></span><span class="sr-only"> left</span></span></h3>
+            <p class="row-meta" id="whisper-meta"></p>
+          </div>
+          <div class="chips" role="radiogroup" aria-labelledby="whisper-title" data-key="whisperMinutes"></div>
+        </div>
+
+        <div class="banner" id="override" role="alert" hidden>
+          <p>You changed the volume, so the fade is paused.</p>
+          <button type="button" class="btn btn-green" id="resume">Resume fade</button>
+        </div>
+
+        <div class="actions" id="fade-actions">
+          <button type="button" class="btn btn-white" id="restart" title="Start the countdown again from now">Restart</button>
+          <button type="button" class="btn btn-green" data-extend="10" aria-label="Add 10 minutes to this step" title="Add 10 minutes to this step">+10</button>
+          <button type="button" class="btn btn-green" data-extend="20" aria-label="Add 20 minutes to this step" title="Add 20 minutes to this step">+20</button>
+          <button type="button" class="btn btn-red" id="fade-cancel" aria-label="Cancel Fade to Sleep">Cancel</button>
+        </div>
+        <p class="error" id="fade-error" role="alert" hidden></p>
+      </section>
+
+      <!-- Alarm -->
+      <section class="col" id="alarm" aria-labelledby="alarm-title">
+        <div class="col-head">
+          <button type="button" class="switch" id="alarm-switch" role="switch" aria-checked="false" aria-labelledby="alarm-title">
+            <span class="knob"></span>
+          </button>
+          <h2 class="col-title" id="alarm-title">Alarm</h2>
+          <svg class="col-icon sun" viewBox="0 0 48 48" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="24" cy="24" r="10" />
+            <path d="M24 4v6M24 38v6M4 24h6M38 24h6M9.9 9.9l4.2 4.2M33.9 33.9l4.2 4.2M9.9 38.1l4.2-4.2M33.9 14.1l4.2-4.2" />
+            <path d="M18.5 22.5q1.5 2 3 0M26.5 22.5q1.5 2 3 0M22 28.5q2 1.6 4 0" stroke-width="1.6" />
+          </svg>
+        </div>
+
+        <p class="col-hint" id="alarm-hint" role="status"></p>
+
+        <div id="alarm-set">
+          <div class="row-head">
+            <h3 class="row-title">Wakeup time</h3>
+            <button type="button" class="link" id="limits-link">limitations</button>
+          </div>
+          <div class="wake-time">
+            <button type="button" class="icon-btn" id="pick-time" aria-label="Choose the wake date and time">
+              <svg viewBox="0 0 40 40" aria-hidden="true">
+                <rect x="3" y="7" width="26" height="24" rx="3" fill="currentColor" />
+                <rect x="8" y="3" width="3" height="8" rx="1.5" fill="currentColor" />
+                <rect x="21" y="3" width="3" height="8" rx="1.5" fill="currentColor" />
+                <path fill="#141432" d="M6 14h20v2H6zM7 18h4v3H7zm6 0h4v3h-4zm6 0h4v3h-4zM7 23h4v3H7zm6 0h4v3h-4z" />
+                <circle cx="29" cy="28" r="9.5" fill="#141432" stroke="currentColor" stroke-width="2.5" />
+                <path d="M29 23.5V28l3 2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+              </svg>
+            </button>
+            <p class="wake-display" id="wake-display"></p>
+            <button type="button" class="icon-btn play" id="test-sound" aria-label="Test wake sound" aria-pressed="false" title="Test wake sound">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path id="test-icon" fill="currentColor" d="M8 5.5v13l11-6.5z" /></svg>
+            </button>
+          </div>
+          <input type="datetime-local" id="wake-input" class="picker-input" tabindex="-1" aria-hidden="true" />
+          <p class="row-meta wake-meta" id="wake-meta"></p>
+          <div class="actions" id="alarm-actions">
+            <button type="button" class="btn btn-green" id="wake-plus" aria-label="Wake 10 minutes later">+10</button>
+            <button type="button" class="btn btn-yellow" id="wake-minus" aria-label="Wake 10 minutes earlier">−10</button>
+            <button type="button" class="btn btn-red" id="alarm-cancel" aria-label="Cancel the alarm">Cancel</button>
+          </div>
+        </div>
+
+        <div id="alarm-ringing" class="ringing" hidden>
+          <p class="ring-title" id="ring-title" tabindex="-1"></p>
+          <p class="ring-time" id="ring-time"></p>
+          <p class="row-meta" id="ring-sub"></p>
+          <button type="button" class="btn btn-green btn-big" id="snooze">Snooze 9 min</button>
+          <button type="button" class="btn btn-yellow btn-big" id="awake">I'm awake</button>
+        </div>
+        <p class="error" id="alarm-error" role="alert" hidden></p>
+      </section>
+    </main>
+
+    <!-- Limitations: reliability facts + the alarm's options -->
+    <dialog id="limits" aria-labelledby="limits-title">
+      <h2 id="limits-title">Before you rely on the alarm</h2>
+      <p class="disclosure">
+        SleepyTube cannot wake your computer from sleep. Keep Chrome open and the computer awake, or use a separate
+        alarm as backup.
+      </p>
+      <ul class="limits-list">
+        <li>Leave Chrome running. Closing it switches the alarm off.</li>
+        <li>Keep a laptop's lid open and plug it in.</li>
+        <li>Check the computer isn't muted, and press Test to hear where the sound plays (speakers or headphones).</li>
+        <li>If the computer was asleep at alarm time, the alarm is skipped rather than ringing late.</li>
+        <li>For Fade to Sleep, keep the YouTube tab open. Closing it stops the fade.</li>
+      </ul>
+      <div class="option">
+        <button type="button" class="switch" id="keep-awake" role="switch" aria-checked="false" aria-labelledby="keep-awake-label" aria-describedby="keep-awake-help">
+          <span class="knob"></span>
+        </button>
+        <div>
+          <p class="option-title" id="keep-awake-label">Keep computer awake until the alarm</p>
+          <p class="fine" id="keep-awake-help">
+            Stops sleep from inactivity until you dismiss the alarm. The screen can still turn off. Uses more battery,
+            and can't stop sleep when the lid closes.
+          </p>
+        </div>
+      </div>
+      <div class="option">
+        <label class="option-title" for="wake-volume">Alarm volume</label>
+        <input type="range" id="wake-volume" min="10" max="100" step="5" value="70" />
+        <button type="button" class="btn btn-white" id="limits-test" aria-pressed="false">▶ Test</button>
+      </div>
+      <p class="error" id="limits-error" role="alert" hidden></p>
+      <div class="dialog-foot">
+        <button type="button" class="link" id="limits-info">More about how SleepyTube works</button>
+        <button type="button" class="btn btn-green" id="limits-close">Done</button>
+      </div>
+    </dialog>
+  </body>
+</html>

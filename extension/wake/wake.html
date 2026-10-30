@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SleepyTube · Wake up</title>
+    <link rel="icon" href="../icons/icon-32.png" />
+    <link rel="stylesheet" href="../ui/theme.css" />
+    <link rel="stylesheet" href="wake.css" />
+    <script src="../lib/core.js"></script>
+    <script src="wake.js" defer></script>
+  </head>
+  <body class="sky">
+    <main class="wake" aria-labelledby="title">
+      <img class="logo" src="../images/logo.svg" alt="" />
+      <p id="clock" class="clock" aria-hidden="true"></p>
+      <h1 id="title" tabindex="-1">Good morning</h1>
+      <p id="sub" class="sub"></p>
+      <p id="audio-error" class="error" role="alert" hidden></p>
+
+      <div class="buttons">
+        <button id="snooze" type="button" class="btn btn-green huge">Snooze 9 min</button>
+        <button id="awake" type="button" class="btn btn-yellow huge">I'm awake</button>
+        <button id="restore" type="button" class="btn btn-white huge" hidden>Restore video sound</button>
+        <button id="close" type="button" class="btn huge ghost" hidden>Close</button>
+      </div>
+      <p id="error" class="error" role="alert" hidden></p>
+      <p id="note" class="note">The YouTube video stays silent until you choose to restore it.</p>
+      <p id="live" class="sr-only" aria-live="assertive"></p>
+    </main>
+  </body>
+</html>
