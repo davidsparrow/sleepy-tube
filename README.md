@@ -18,10 +18,14 @@ It is built to the [product requirements document](SleepyTube_PRD_v1.md) (MVP, v
 
 ## Install (developer mode)
 
-1. Clone this repository.
+**Testers: follow the click-by-click guide in [docs/QA.md, Part 1](docs/QA.md#part-1-install-sleepytube-about-10-minutes).** It needs no Terminal: you download a ZIP from GitHub and load it into Chrome.
+
+In short:
+
+1. Download this repository (green **Code** button → **Download ZIP**) and unzip it, or clone it with Git.
 2. Open `chrome://extensions` and turn on **Developer mode**.
-3. Click **Load unpacked** and choose the **`extension/`** folder.
-4. Pin SleepyTube to the toolbar.
+3. Click **Load unpacked** and choose the **`extension`** folder inside it.
+4. Pin SleepyTube to the toolbar (puzzle-piece icon → pin).
 
 YouTube tabs that were already open are picked up automatically, so there's no need to reload them.
 
@@ -105,7 +109,11 @@ docs/QA.md             Gate A spike plan, QA matrix, debugging helpers
 
 There's no build step: the folder is the extension. Plain JavaScript, no dependencies at runtime.
 
+All commands run in Terminal from the repository folder:
+
 ```sh
+git clone https://github.com/davidsparrow/sleepy-tube.git
+cd sleepy-tube            # run everything below from here
 npm test                  # unit tests for the timing/volume core (Node 18+)
 npm install               # once, for Playwright
 npx playwright install chromium
@@ -136,11 +144,13 @@ The end-to-end suite loads the extension into Chromium, serves a stand-in `www.y
 
 ### Debugging
 
-Open `chrome://extensions` → SleepyTube → **service worker** to get a console, then:
+Open `chrome://extensions` → SleepyTube → **Inspect views: service worker** → **Console** (step-by-step in [docs/QA.md, Part 2](docs/QA.md#part-2-the-debug-console-your-time-machine)), then:
 
 ```js
 await sleepyDebug.session()       // tonight's stored session
 await sleepyDebug.notices()       // notices waiting in the popup
+await sleepyDebug.alarmLog()      // recent alarm events: due vs. actual time, sound problems
+await sleepyDebug.skipToAlarm()   // make the alarm ring now
 await sleepyDebug.fastForward(20) // jump 20 minutes ahead (e.g. to the fade or the alarm)
 await sleepyDebug.reset()         // forget tonight's session and notices without touching the video
 ```
